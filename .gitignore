@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# Throwaway test deployments of the tool
+testing/*
+!testing/.gitkeep
