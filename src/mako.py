@@ -234,6 +234,23 @@ CARD_BODY = """
 
 """
 
+
+def nest_headings(text: str) -> str:
+    """Pushes a description's headings down so the shallowest is ###, keeping it inside its
+    ## Description section (edit finds the section's end at the next ## heading)."""
+    lines, fence = text.split("\n"), False
+    heads = []
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+        elif not fence and (h := re.match(r"^(#{1,6})\s", line)):
+            heads.append((i, len(h.group(1))))
+    shift = 3 - min((n for _, n in heads), default=3)
+    for i, n in heads if shift > 0 else ():
+        lines[i] = "#" * min(n + shift, 6) + lines[i][n:]
+    return "\n".join(lines)
+
+
 # A spike's summary: on its branch at .mako_spikes/spike_<ID>_<slug>.md, written by Mako
 # at claim time (frontmatter filled in), the body by the agent.
 SPIKE_DIR = ".mako_spikes"
@@ -714,7 +731,8 @@ class Mako:
         if kind == "spike":
             meta["publish_to"] = (self.spike_publish_to if publish_to is None else publish_to).strip()
         card = Card(self.open_dir / f"{cid}.md", meta,
-                    CARD_BODY.format(title=title.strip(), description=description.strip() or "_TBD_"))
+                    CARD_BODY.format(title=title.strip(),
+                                     description=nest_headings(description.strip()) or "_TBD_"))
         self.save(card)
         return card
 
@@ -1067,8 +1085,13 @@ class Mako:
                 else:
                     card.meta.pop("publish_to", None)
             if description is not None:
-                text = description.strip() or "_TBD_"
-                section = re.compile(r"(?ms)^(## Description[ \t]*\n).*?(?=^## |\Z)")
+                text = nest_headings(description.strip()) or "_TBD_"
+                # Older cards may hold ## headings inside the description, so prefer the
+                # template's next section as the end.
+                end = r"^## (?:Acceptance criteria|Notes)[ \t]*$"
+                if not re.search(rf"(?m){end}", card.body):
+                    end = r"^## "
+                section = re.compile(rf"(?ms)^(## Description[ \t]*\n).*?(?={end}|\Z)")
                 if section.search(card.body):
                     card.body = section.sub(lambda mm: f"{mm.group(1)}\n{text}\n\n", card.body, count=1)
                 else:
