@@ -561,6 +561,52 @@ class Mako:
         self.save(card, closed=False)
         return card
 
+    def _edit(self, cid: str, title: str | None, kind: str | None,
+              description: str | None, append: str | None) -> Card:
+        """Change a Backlog card's title, type or body. Holds the issue's claim
+        lock while checking and writing, so a claim and an edit can't overlap."""
+        card = self.get(cid)
+        cid = card.id
+        if card.status == "done":
+            raise MakoError(f"{cid} is closed; `mako reopen {cid}` it first")
+        if kind is not None and kind not in TYPES:
+            raise MakoError(f"type must be one of {', '.join(TYPES)}")
+        if title is not None and not title.strip():
+            raise MakoError("title can't be empty")
+        lock_dir = self.locks / cid
+        try:
+            lock_dir.mkdir()
+        except FileExistsError:
+            who = (self.read_lock(cid) or {}).get("agent", "?")
+            raise MakoError(f"{cid} is in progress ({who}); release it first "
+                            "or leave a note for the worker") from None
+        try:
+            card = read_card(card.path)
+            if card.status != "backlog" or card.meta.get("claimed_by"):
+                who = card.meta.get("claimed_by") or "?"
+                raise MakoError(f"{cid} is in progress ({who}); release it first "
+                                "or leave a note for the worker")
+            if title is not None:
+                old = card.title
+                card.meta["title"] = title.strip()
+                card.body = re.sub(rf"(?m)^# {re.escape(old)}[ \t]*$",
+                                   lambda _: f"# {title.strip()}", card.body, count=1)
+            if kind is not None:
+                card.meta["type"] = kind
+            if description is not None:
+                text = description.strip() or "_TBD_"
+                section = re.compile(r"(?ms)^(## Description[ \t]*\n).*?(?=^## |\Z)")
+                if section.search(card.body):
+                    card.body = section.sub(lambda mm: f"{mm.group(1)}\n{text}\n\n", card.body, count=1)
+                else:
+                    card.body = f"\n# {card.title}\n\n## Description\n\n{text}\n"
+            if append is not None and append.strip():
+                card.body = card.body.rstrip("\n") + f"\n\n{append.strip()}\n"
+            self.save(card, closed=False)
+        finally:
+            shutil.rmtree(lock_dir, ignore_errors=True)
+        return card
+
     def _next_backlog(self, kind: str | None) -> Card:
         pos = {cid: i for i, cid in enumerate(self.order)}
         backlog = [c for c in self.cards()
@@ -590,6 +636,9 @@ class Mako:
 
     def reopen(self, cid):
         return self.transact(lambda: self._reopen(cid))
+
+    def edit(self, cid, title=None, kind=None, description=None, append=None):
+        return self.transact(lambda: self._edit(cid, title, kind, description, append))
 
     def sync(self):
         return self.transact(lambda: None)
@@ -666,7 +715,9 @@ This workspace uses Mako: a kanban board plus fixed agent slots, each with its o
 - Issues: cards like `{prefix}-0001` in kanban/open and kanban/closed, shown on kanban/board.md (Obsidian).
 - Lifecycle: Backlog -> In Progress (claim) -> Done (close). Closing merges the issue branch into
   `{base}`, so nothing reaches Done unmerged.
-- Mako owns kanban/. Never edit those files directly; use the mako tools.
+- Mako owns kanban/. Never edit those files directly; use the mako tools. To change a card's
+  title, type or description, use `edit_issue` (`mako edit`); it only works while the card is in
+  the Backlog.
 """
 
 GUIDE_WORKER = """
@@ -696,8 +747,8 @@ GUIDE_ORCHESTRATOR = """
 
 You run at the workspace root. Worker slots: {agents}.
 
-- Write and refine issues with `create_issue`; check progress with `list_issues`, `get_issue`
-  and `mako status`.
+- Write issues with `create_issue` and refine Backlog ones with `edit_issue`; check progress
+  with `list_issues`, `get_issue` and `mako status`.
 - Do not claim issues and do not merge: workers merge their own work when they close.
 - `release_issue` returns a stuck issue to the Backlog; `mako reopen <ID>` reopens a closed one.
 """
@@ -707,6 +758,7 @@ GUIDE_CLI = """
 
 `mako` is on PATH in panes started by mako.launch.bat:
 `mako list [--all]`, `mako status`, `mako show <ID>`, `mako new <feature|bug|spike> "title"`,
+`mako edit <ID> [--title ..] [--type ..] [--description ..|--description-file ..] [--append ..]`,
 `mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`, `mako reopen <ID>`,
 `mako guide`, `mako init` (re-run to upgrade the generated files).
 """
@@ -735,6 +787,16 @@ MCP_TOOLS = [
          "type": {"type": "string", "enum": list(TYPES)},
          "title": {"type": "string"},
          "description": {"type": "string"}}, "required": ["type", "title"]}},
+    {"name": "edit_issue",
+     "description": "Change a Backlog issue's title, type or description, or append a note. "
+                    "Refused once the issue is claimed (In Progress) or closed (Done).",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"},
+         "title": {"type": "string"},
+         "type": {"type": "string", "enum": list(TYPES)},
+         "description": {"type": "string", "description": "Replaces the card's Description section."},
+         "append": {"type": "string", "description": "Text added to the end of the card."}},
+         "required": ["id"]}},
     {"name": "claim_issue",
      "description": "Claim an issue for your slot: locks it, checks out its branch in your worktree, "
                     "moves it to In Progress.",
@@ -777,6 +839,12 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
     if name == "create_issue":
         card = m.new(args["type"], args["title"], args.get("description", ""))
         result = f"Created {card.id}: {card.title}"
+    elif name == "edit_issue":
+        fields = {k: args.get(k) for k in ("title", "type", "description", "append")}
+        if all(v is None for v in fields.values()):
+            raise MakoError("nothing to change: pass title, type, description or append")
+        card = m.edit(args["id"], fields["title"], fields["type"], fields["description"], fields["append"])
+        result = f"Edited {card.id}: {card.title}"
     elif name == "claim_issue":
         result = fmt_claim(m.claim(args["id"], agent))
     elif name == "claim_next":
@@ -1114,6 +1182,15 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("show", help="print an issue card")
     s.add_argument("id")
 
+    s = sub.add_parser("edit", help="change a Backlog issue (no options: print it)")
+    s.add_argument("id")
+    s.add_argument("--title")
+    s.add_argument("--type", choices=TYPES)
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--description", help="replace the Description section")
+    g.add_argument("--description-file", help="read the new description from a file")
+    s.add_argument("--append", help="add text to the end of the card")
+
     s = sub.add_parser("guide", help="print the Mako rules for an agent slot or the orchestrator")
     s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
@@ -1159,6 +1236,18 @@ def main(argv: list[str] | None = None) -> int:
             out = fmt_issue_list(m, include_done=a.all)
         elif a.cmd == "show":
             out = m.get(a.id).path.read_text(encoding="utf-8")
+        elif a.cmd == "edit":
+            desc = a.description
+            if a.description_file:
+                try:
+                    desc = Path(a.description_file).read_text(encoding="utf-8")
+                except OSError as e:
+                    raise MakoError(f"can't read {a.description_file}: {e.strerror}") from None
+            if all(v is None for v in (a.title, a.type, desc, a.append)):
+                out = m.get(a.id).path.read_text(encoding="utf-8")
+            else:
+                card = m.edit(a.id, a.title, a.type, desc, a.append)
+                out = f"Edited {card.id}: {card.title}"
         elif a.cmd == "guide":
             out = guide(m, a.agent)
         elif a.cmd == "status":
