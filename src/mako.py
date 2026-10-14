@@ -518,9 +518,9 @@ class Mako:
     def _create_from_text(self, text: str) -> Card:
         tag = re.search(r"\s#(feature|bug|spike)\b", text)
         text = re.sub(r"\s+#(feature|bug|spike)\b", "", text).strip()
-        m = re.match(r"(?i)^(feature|bug|spike)\s*[:\-]\s*(.+)$", text)
-        if m:
-            kind, title = m.group(1).lower(), m.group(2)
+        prefix = re.match(r"(?i)^(feature|bug|spike)\s*[:\-]\s*(.+)$", text)
+        if prefix:
+            kind, title = prefix.group(1).lower(), prefix.group(2)
         else:
             kind, title = (tag.group(1) if tag else "feature"), text
         card = self._new(kind, title.strip(), "")
