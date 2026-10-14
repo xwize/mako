@@ -94,3 +94,18 @@ touches your cards, config or repo history.
 4. Closed the terminal? `.\mako.cmd resume` reopens the same layout with every pane continuing its
    last Claude conversation (`claude -c`); a pane with no earlier conversation starts fresh.
    `mako resume <slot|orchestrator>` reopens just one tab.
+
+### Code review before merging (optional)
+
+Set `review_command` in `.mako/config.json` to any review or diff tool, for example:
+
+```json
+"review_command": "npx difit HEAD {base}"
+```
+
+Placeholders: `{base}`, `{branch}`, `{id}`, `{worktree}`. When it is set, workers call
+`request_review` once their branch is ready. Mako runs the command in their worktree, without
+waiting for it (output in `.mako/logs/<ID>.review.log`), and the worker waits for you to reply
+"approve" or send comments in its pane. `close_issue` refuses a branch with commits that weren't
+reviewed. `mako close` from the CLI is never gated, and `mako review <ID>` reopens the tool. Leave
+it empty (`""`, the default) for no review step.
