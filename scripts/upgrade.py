@@ -2,19 +2,26 @@
 """Install the dev mako.py into a workspace's .mako/. Standard library only.
 
 We develop Mako with Mako: the board runs on <workspace>/.mako/mako.py while
-development happens in <workspace>/<project>/src/mako.py. This copies the
-merged dev copy (the main checkout, never a worker's worktree) over the
-installed one, keeping a timestamped backup in .mako/backups/. If the new
-copy fails `mako --help`, the backup is put straight back.
+development happens in <workspace>/<project>/src/mako.py. This installs the
+merged dev copy (the main checkout, never a worker's worktree) into a workspace.
 
-It only replaces .mako/mako.py: kanban/, config.json, locks and worktrees are
-left alone. Files that `init` generates (bin shims, agent.cmd, agents/*.mcp.json,
-mako.launch.bat) are not regenerated.
+The install itself is the source's own `mako init`, run in the workspace: it
+copies mako.py and templates/ into .mako/ and regenerates the files init owns
+(bin shims, agent.cmd, agents/*.mcp.json, mako.launch.bat, .obsidian plugins).
+Init never touches cards, config.json, locks or the project's history. What this
+script adds around it are the safety checks: the source must be committed on
+the base branch, compile and start (`--help`), and the old mako.py and
+templates/ are backed up to .mako/backups/<stamp>/ first. If init fails, the
+backup is put straight back.
+
+(Why not just document `python <project>/src/mako.py init`? It installs
+whatever is in the file, uncommitted or not, with no way back. Those checks
+belong to developing Mako, not to init, which end users run too.)
 
     python upgrade.py                    upgrade the workspace this repo lives in
     python upgrade.py --workspace DIR    upgrade another workspace (or set MAKO_ROOT)
-    python upgrade.py --source FILE      install a specific mako.py
-    python upgrade.py --rollback         restore the newest backup
+    python upgrade.py --source FILE      install a specific mako.py (and its templates/)
+    python upgrade.py --rollback         restore the newest backup and regenerate
 """
 from __future__ import annotations
 
@@ -53,12 +60,26 @@ def find_workspace(arg: str | None) -> Path:
     return root
 
 
-def describe(path: Path) -> str:
-    data = path.read_bytes()
+def tree(path: Path) -> dict[str, bytes]:
+    """Relative path -> content for every file under path (empty if missing)."""
+    if not path.is_dir():
+        return {}
+    return {p.relative_to(path).as_posix(): p.read_bytes() for p in sorted(path.rglob("*")) if p.is_file()}
+
+
+def describe(code: Path, templates: Path | None = None) -> str:
+    data = code.read_bytes()
     m = re.search(rb'^VERSION = "([^"]+)"', data, re.M)
     version = m.group(1).decode() if m else "?"
-    mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-    return f"v{version}  sha256 {hashlib.sha256(data).hexdigest()[:12]}  {mtime}"
+    mtime = datetime.fromtimestamp(code.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    text = f"v{version}  sha256 {hashlib.sha256(data).hexdigest()[:12]}  {mtime}"
+    if templates is not None:
+        files = tree(templates)
+        h = hashlib.sha256()
+        for rel, content in files.items():
+            h.update(rel.encode() + b"\0" + hashlib.sha256(content).digest())
+        text += f"  templates {h.hexdigest()[:12]} ({len(files)} files)" if files else "  no templates"
+    return text
 
 
 def git(repo: Path, *args: str) -> str | None:
@@ -75,9 +96,9 @@ def check_source(src: Path, base: str, force: bool) -> list[str]:
     problems: list[str] = []
     if git(src.parent, "rev-parse", "--is-inside-work-tree") != "true":
         return [f"warning: {src} is not in a git repo; cannot check it is merged code"]
-    dirty = git(src.parent, "status", "--porcelain", "--", src.name)
+    dirty = git(src.parent, "status", "--porcelain", "--", src.name, "templates")
     if dirty:
-        problems.append(f"{src} has uncommitted changes")
+        problems.append(f"{src.parent} has uncommitted changes to {src.name} or templates/")
     branch = git(src.parent, "rev-parse", "--abbrev-ref", "HEAD")
     if branch != base:
         problems.append(f"{src.parent} is on '{branch}', not the base branch '{base}'")
@@ -86,10 +107,30 @@ def check_source(src: Path, base: str, force: bool) -> list[str]:
     return [f"warning: {p} (--force)" for p in problems]
 
 
+def run_init(root: Path, script: Path) -> subprocess.CompletedProcess:
+    """`<script> init` in the workspace: installs script + its templates, regenerates files."""
+    return subprocess.run([sys.executable, str(script), "init"], cwd=root,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def restore(backup: Path, dot_mako: Path) -> None:
+    """Put a backup's mako.py (and templates/, if it has them) back into .mako/."""
+    code = backup / "mako.py" if backup.is_dir() else backup
+    tmp = dot_mako / ".mako.py.upgrade"
+    shutil.copy2(code, tmp)
+    os.replace(tmp, dot_mako / "mako.py")
+    if backup.is_dir():
+        shutil.rmtree(dot_mako / "templates", ignore_errors=True)
+        if (backup / "templates").is_dir():
+            shutil.copytree(backup / "templates", dot_mako / "templates")
+
+
 def upgrade(root: Path, src: Path | None, force: bool, dry_run: bool) -> None:
     config = json.loads((root / ".mako" / "config.json").read_text(encoding="utf-8"))
-    dest = root / ".mako" / "mako.py"
+    dot_mako = root / ".mako"
+    dest, dest_tpl = dot_mako / "mako.py", dot_mako / "templates"
     src = src.resolve() if src else root / config["project"] / "src" / "mako.py"
+    src_tpl = src.parent / "templates"
     if not src.is_file():
         raise UpgradeError(f"source not found: {src}")
     if src == dest.resolve():
@@ -97,21 +138,26 @@ def upgrade(root: Path, src: Path | None, force: bool, dry_run: bool) -> None:
 
     for w in check_source(src, config.get("base_branch", "main"), force):
         print(w)
+    if not src_tpl.is_dir():
+        print(f"warning: no templates/ next to {src}; .mako/templates will be left as it is")
 
-    # Never install code that does not even compile.
+    # Never install code that does not even compile, or start.
     with tempfile.TemporaryDirectory() as tmp:
         try:
             py_compile.compile(str(src), cfile=str(Path(tmp) / "mako.pyc"), doraise=True)
         except py_compile.PyCompileError as e:
             raise UpgradeError(f"source does not compile:\n{e.msg}")
+    r = subprocess.run([sys.executable, str(src), "--help"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise UpgradeError(f"source fails `mako --help`:\n{r.stderr}")
 
     print(f"source:      {src}")
-    print(f"             {describe(src)}")
+    print(f"             {describe(src, src_tpl)}")
     print(f"destination: {dest}")
     if dest.is_file():
-        print(f"             {describe(dest)}")
-        if dest.read_bytes() == src.read_bytes():
-            print("Already up to date; nothing to do.")
+        print(f"             {describe(dest, dest_tpl)}")
+        if dest.read_bytes() == src.read_bytes() and (not src_tpl.is_dir() or tree(dest_tpl) == tree(src_tpl)):
+            print("Already up to date; nothing to do. (Run `mako init` to just regenerate files.)")
             return
     else:
         print("             (not installed yet)")
@@ -119,59 +165,85 @@ def upgrade(root: Path, src: Path | None, force: bool, dry_run: bool) -> None:
     backup = None
     if dest.is_file():
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = root / ".mako" / "backups" / f"mako.py.{stamp}.bak"
+        backup = dot_mako / "backups" / stamp
         n = 1
         while backup.exists():
             n += 1
-            backup = backup.with_name(f"mako.py.{stamp}-{n}.bak")
+            backup = backup.with_name(f"{stamp}-{n}")
     if dry_run:
         print(f"backup:      {backup or '(none)'}")
+        print(f"then:        {src.name} init in {root}")
         print("Dry run; nothing changed.")
         return
 
     if backup:
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(dest, backup)
+        backup.mkdir(parents=True)
+        shutil.copy2(dest, backup / "mako.py")
+        if dest_tpl.is_dir():
+            shutil.copytree(dest_tpl, backup / "templates")
         print(f"backup:      {backup}")
-    tmp = dest.with_name(".mako.py.upgrade")
-    shutil.copy2(src, tmp)
-    os.replace(tmp, dest)
-    # Smoke test that does not touch the board: the CLI must at least start.
-    r = subprocess.run([sys.executable, str(dest), "--help"], capture_output=True, text=True)
+    r = run_init(root, src)
     if r.returncode != 0:
         if backup:
-            shutil.copy2(backup, dest)
-        raise UpgradeError(f"installed copy failed `mako --help`; "
-                           f"{'restored the backup' if backup else 'left it in place'}:\n{r.stderr}")
-    print(f"Installed:   {describe(dest)}")
+            restore(backup, dot_mako)
+        raise UpgradeError(f"`mako init` failed; {'restored the backup' if backup else 'nothing to restore'}"
+                           f" (generated files may be half-updated; re-run init to fix):\n"
+                           f"{r.stdout}{r.stderr}")
+    print_init(r.stdout)
+    print(f"Installed:   {describe(dest, dest_tpl)}")
     print_reminders(root)
+
+
+def backups(dot_mako: Path) -> list[Path]:
+    """Oldest first. New style: <stamp>[-n]/ with mako.py and templates/.
+    Old style (code only): mako.py.<stamp>[-n].bak."""
+    def order(p: Path) -> tuple[str, int]:
+        m = re.fullmatch(r"(?:mako\.py\.)?(\d{8}-\d{6})(?:-(\d+))?(?:\.bak)?", p.name)
+        return (m.group(1), int(m.group(2) or 1))
+    found = [p for p in (dot_mako / "backups").glob("*")
+             if (p.is_dir() and re.fullmatch(r"\d{8}-\d{6}(-\d+)?", p.name) and (p / "mako.py").is_file())
+             or (p.is_file() and re.fullmatch(r"mako\.py\.\d{8}-\d{6}(-\d+)?\.bak", p.name))]
+    return sorted(found, key=order)
 
 
 def rollback(root: Path, dry_run: bool) -> None:
-    dest = root / ".mako" / "mako.py"
-    def order(p: Path) -> tuple[str, int]:
-        # mako.py.<stamp>.bak, then mako.py.<stamp>-<n>.bak for same-second backups
-        m = re.fullmatch(r"mako\.py\.(\d{8}-\d{6})(?:-(\d+))?\.bak", p.name)
-        return (m.group(1), int(m.group(2) or 1)) if m else ("", 0)
-    backups = sorted((root / ".mako" / "backups").glob("mako.py.*.bak"), key=order)
-    if not backups:
+    dot_mako = root / ".mako"
+    dest = dot_mako / "mako.py"
+    found = backups(dot_mako)
+    if not found:
         raise UpgradeError("no backups in .mako/backups/")
-    latest = backups[-1]
+    latest = found[-1]
     print(f"restore:     {latest}")
-    print(f"             {describe(latest)}")
+    if latest.is_dir():
+        print(f"             {describe(latest / 'mako.py', latest / 'templates')}")
+    else:
+        print(f"             {describe(latest)}")
+        print("             (old-style backup: restores mako.py only; templates/ stay as they are)")
     print(f"over:        {dest}")
     if dest.is_file():
-        print(f"             {describe(dest)}")
+        print(f"             {describe(dest, dot_mako / 'templates')}")
     if dry_run:
         print("Dry run; nothing changed.")
         return
-    tmp = dest.with_name(".mako.py.upgrade")
-    shutil.copy2(latest, tmp)
-    os.replace(tmp, dest)
+    restore(latest, dot_mako)
     # Consume the backup so repeated rollbacks step further back.
-    latest.unlink()
-    print(f"Restored:    {describe(dest)}")
+    shutil.rmtree(latest) if latest.is_dir() else latest.unlink()
+    print(f"Restored:    {describe(dest, dot_mako / 'templates')}")
+    # Regenerate with the restored code so the generated files match it again.
+    r = run_init(root, dest)
+    if r.returncode != 0:
+        print(f"warning: `mako init` failed after the restore; generated files may not match:\n"
+              f"{r.stdout}{r.stderr}")
+    else:
+        print_init(r.stdout)
     print_reminders(root)
+
+
+def print_init(out: str) -> None:
+    lines = [l for l in out.splitlines() if l.strip()]
+    print("mako init:")
+    for line in lines or ["(no files changed)"]:
+        print(f"  {line}")
 
 
 def print_reminders(root: Path) -> None:
@@ -180,8 +252,6 @@ def print_reminders(root: Path) -> None:
     print(f"  - check it works: run `mako status` and `mako list` in {root}")
     print("  - running MCP servers keep the old code until their Claude sessions restart;")
     print("    restart the orchestrator and agent panes to pick up the new version")
-    print("  - files generated by `mako init` (bin shims, agent.cmd, agents/*.mcp.json,")
-    print("    mako.launch.bat) were not regenerated")
 
 
 def main(argv: list[str] | None = None) -> int:
