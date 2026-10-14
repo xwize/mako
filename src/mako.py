@@ -234,6 +234,42 @@ CARD_BODY = """
 
 """
 
+# The `## ` headings Mako writes in a card body: CARD_BODY's sections, and the notes
+# _append adds (`## Released (agent-a, <date>)`). Only these end the Description section,
+# so a description may have `## ` headings of its own, just not one of these.
+CARD_SECTIONS = ("Description", "Acceptance criteria", "Notes")
+NOTE_HEADINGS = ("Closing note", "Released", "Discarded", "Reopened")
+MAKO_HEADING = re.compile(rf"## (?:(?:{'|'.join(map(re.escape, CARD_SECTIONS))})"
+                          rf"|(?:{'|'.join(map(re.escape, NOTE_HEADINGS))}) \(.*\))[ \t]*")
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+
+
+def mako_headings(text: str) -> list[tuple[int, str]]:
+    """(offset, heading) of each Mako heading line in text, skipping fenced code blocks."""
+    found, fence, pos = [], None, 0
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\r\n")
+        marker = FENCE.match(bare)
+        if fence:
+            if (marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence)
+                    and not bare[marker.end():].strip()):
+                fence = None
+        elif marker:
+            fence = marker.group(1)
+        elif MAKO_HEADING.fullmatch(bare):
+            found.append((pos, bare.strip()))
+        pos += len(line)
+    return found
+
+
+def check_description(text: str) -> None:
+    """Refuse a description that would split the card: one with a Mako heading in it."""
+    for _, heading in mako_headings(text):
+        name = heading[3:]
+        kind = "a card section" if name in CARD_SECTIONS else "a heading Mako uses for notes"
+        hint = (", or fill in the card's own section" if name in CARD_SECTIONS[1:] else "")
+        raise MakoError(f"'{heading}' is {kind}; use ### inside the description{hint}")
+
 # A spike's summary: on its branch at .mako_spikes/spike_<ID>_<slug>.md, written by Mako
 # at claim time (frontmatter filled in), the body by the agent.
 SPIKE_DIR = ".mako_spikes"
@@ -704,6 +740,7 @@ class Mako:
             raise MakoError("title is required")
         if publish_to and kind != "spike":
             raise MakoError("publish_to is for spikes only")
+        check_description(description)
         cid = self.next_id()
         deps = self.parse_ids(depends)
         self.check_deps(cid, deps)
@@ -1042,6 +1079,8 @@ class Mako:
                 return card
         if title is not None and not title.strip():
             raise MakoError("title can't be empty")
+        if description is not None:
+            check_description(description)
         lock_dir = self.locks / cid
         try:
             lock_dir.mkdir()
@@ -1058,8 +1097,10 @@ class Mako:
             if title is not None:
                 old = card.title
                 card.meta["title"] = title.strip()
-                card.body = re.sub(rf"(?m)^# {re.escape(old)}[ \t]*$",
-                                   lambda _: f"# {title.strip()}", card.body, count=1)
+                heading = re.compile(rf"(?m)^# {re.escape(old)}[ \t]*$")
+                if not heading.search(card.body):  # hand-edited: take the first `# ` line
+                    heading = re.compile(r"(?m)^# .*$")
+                card.body = heading.sub(lambda _: f"# {title.strip()}", card.body, count=1)
             if kind is not None:
                 card.meta["type"] = kind
                 if kind == "spike":
@@ -1068,11 +1109,18 @@ class Mako:
                     card.meta.pop("publish_to", None)
             if description is not None:
                 text = description.strip() or "_TBD_"
-                section = re.compile(r"(?ms)^(## Description[ \t]*\n).*?(?=^## |\Z)")
-                if section.search(card.body):
-                    card.body = section.sub(lambda mm: f"{mm.group(1)}\n{text}\n\n", card.body, count=1)
-                else:
-                    card.body = f"\n# {card.title}\n\n## Description\n\n{text}\n"
+                headings = mako_headings(card.body)
+                starts = [i for i, (_, name) in enumerate(headings) if name == "## Description"]
+                if not starts:
+                    raise MakoError(f"{cid} has no '## Description' section to replace; "
+                                    "fix the card by hand, or use --append")
+                if starts[0] + 1 == len(headings):
+                    raise MakoError(f"{cid}'s Description section has no Mako heading after it "
+                                    f"({', '.join('## ' + s for s in CARD_SECTIONS[1:])}), so "
+                                    "its end is unclear; fix the card by hand, or use --append")
+                begin = card.body.index("\n", headings[starts[0]][0]) + 1
+                end = headings[starts[0] + 1][0]
+                card.body = f"{card.body[:begin]}\n{text}\n\n{card.body[end:]}"
             if append is not None and append.strip():
                 card.body = card.body.rstrip("\n") + f"\n\n{append.strip()}\n"
             if depends is not None or add_deps or remove_deps:
