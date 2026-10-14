@@ -3,7 +3,7 @@
 `mako` is on PATH in panes started by mako.launch.bat:
 `mako list [--all]`, `mako status`, `mako show <ID>`, `mako new <feature|bug|spike> "title"`,
 `mako edit <ID> [--title ..] [--type ..] [--description ..|--description-file ..] [--append ..]`,
-`mako new .. --depends <ID,..>`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
+`mako new .. --depends <ID,..> [--human]`, `mako edit <ID> --human|--no-human`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
 `mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`,
 `mako discard <ID> [--note ".."] [--force]`, `mako reopen <ID>` (closed or discarded),
 {review_cli}`mako launch [slot]`, `mako resume [slot]` (reopen the panes, each continuing its last

@@ -14,7 +14,8 @@ Workspace layout:
         .mako/worktrees/<slot>/ one permanent git worktree per agent slot
 
 Card frontmatter is the source of truth. board.md is a view of it, but drags
-made in Obsidian are picked up by `sync`, which every command runs first.
+made in Obsidian, and card files moved between the kanban folders by hand, are
+picked up by `sync`, which every command runs first.
 
 Lifecycle: Backlog -> In Progress (claim) -> Done (close). Closing merges the
 issue branch into the base branch, so nothing reaches Done unmerged. The worker
@@ -40,6 +41,7 @@ from pathlib import Path
 VERSION = "0.1.0"
 TYPES = ("feature", "bug", "spike")
 COLUMNS = {"backlog": "Backlog", "in-progress": "In Progress", "done": "Done"}
+STATES = {**COLUMNS, "discarded": "Discarded"}
 FIELDS = ("id", "type", "title", "depends_on", "status", "created", "branch",
           "claimed_by", "claimed", "merged", "closed", "discarded")
 LIST_FIELDS = ("depends_on",)
@@ -147,6 +149,12 @@ class Card:
     @property
     def title(self) -> str:
         return self.meta.get("title", "")
+
+    @property
+    def human(self) -> bool:
+        """The user's own task (frontmatter `human: true`): outside the agent workflow,
+        it moves freely between columns and folders and agents can't work on it."""
+        return str(self.meta.get("human", "")).strip().lower() in ("true", "yes", "1")
 
     def render(self) -> str:
         keys = list(FIELDS) + [k for k in self.meta if k not in FIELDS]
@@ -306,10 +314,12 @@ class Mako:
                 if (m := re.fullmatch(rf"{self.prefix}-(\d+)", p.stem))]
         return f"{self.prefix}-{max(nums, default=0) + 1:04d}"
 
+    def folder_for(self, status: str) -> Path:
+        return {"done": self.closed_dir, "discarded": self.discarded_dir}.get(status, self.open_dir)
+
     def save(self, card: Card) -> None:
         """Write the card into the folder for its status: open/, closed/ or discarded/."""
-        folder = {"done": self.closed_dir, "discarded": self.discarded_dir}.get(card.status, self.open_dir)
-        target = folder / f"{card.id}.md"
+        target = self.folder_for(card.status) / f"{card.id}.md"
         write_atomic(target, card.render())
         if card.path != target and card.path.exists():
             card.path.unlink()
@@ -470,17 +480,28 @@ class Mako:
         return items
 
     def sync_board(self) -> None:
-        """Apply what the user did in Obsidian: drags and newly typed cards."""
+        """Apply what the user did by hand, in a fixed order:
+        1. card files moved between kanban/ folders, judged against each card's
+           status as stored (before board.md is read);
+        2. board.md: drags and newly typed cards;
+        3. every change goes through save(), so afterwards each card file is in
+           the folder for its status.
+        A card both moved as a file and dragged on the board in the same sync
+        follows the file move (folder wins); its drag is ignored and the board
+        is re-rendered from the cards."""
+        moved = self.sync_folders()
         self.order, seen = [], set()
         for column, cid, text in self.parse_board():
             if cid is None:
-                card = self._create_from_text(text)
+                card = self._create_from_text(text, column)
                 self.order.append(card.id)
                 continue
             if cid in seen:
                 continue
             seen.add(cid)
             self.order.append(cid)
+            if cid in moved:
+                continue
             path = self.card_path(cid)
             if not path:
                 self.note(f"board: {cid} has no card file, removed from the board")
@@ -501,29 +522,93 @@ class Mako:
             self.note(f"warning: {problem}")
 
     def _apply_drag(self, card: Card, column: str) -> None:
+        """A board drag. Claiming (-> In Progress) and closing (-> Done) belong to
+        agents; by hand a normal card can only be released, reopened or reordered.
+        Human cards go anywhere."""
+        if card.human:
+            self._set_human_status(card, column)
+            return
         if column == "in-progress":
-            if blocked := self.blockers(card):
-                raise MakoError(f"it is blocked by {', '.join(blocked)}")
-            raise MakoError("cards only enter In Progress when an agent claims them")
+            raise MakoError(f"{card.id} can only be claimed by an agent (claim_issue / mako claim)")
         if column == "backlog":
             if card.status == "done":
                 self._reopen(card.id)
             else:
                 self._release(card.id, agent=None, note="", force=False)
         elif card.status == "in-progress":
-            self._close(card.id, agent=None, note="", force=False)
+            raise MakoError(f"{card.id} can only be closed by an agent (close_issue / mako close)")
         else:
             raise MakoError(f"a {COLUMNS[card.status]} card can't move to {COLUMNS[column]}")
 
-    def _create_from_text(self, text: str) -> Card:
+    def _set_human_status(self, card: Card, status: str) -> None:
+        """Move a human card: only its status and timestamps change, no locks or git."""
+        card.meta.update(status=status, closed=now() if status == "done" else "",
+                         discarded=now() if status == "discarded" else "")
+        self.save(card)
+
+    def sync_folders(self) -> set[str]:
+        """Act on card files moved between kanban/open, closed and discarded by
+        hand: the folder is the user asking for the matching action. Refused or
+        failed moves snap back. Returns the ids moved (or refused), so the board
+        sync leaves them alone. An id found in two folders is reported and left
+        as it is."""
+        found: dict[str, list[Path]] = {}
+        for d in self.card_dirs:
+            for p in sorted(d.glob(f"{self.prefix}-*.md")):
+                found.setdefault(p.stem, []).append(p)
+        handled = set()
+        for cid, paths in found.items():
+            if len(paths) > 1:
+                where = ", ".join(f"kanban/{p.parent.name}" for p in paths)
+                self.note(f"warning: {cid} is in more than one folder ({where}); neither copy was "
+                          "acted on. Delete or merge the extra one by hand")
+                handled.add(cid)
+                continue
+            card = read_card(paths[0])
+            folder = paths[0].parent
+            if folder == self.folder_for(card.status):
+                continue
+            handled.add(cid)
+            try:
+                self._apply_file_move(card, folder)
+                state = self.get(cid).status
+                self.note(f"kanban: {cid} moved to kanban/{folder.name}: now {STATES.get(state, state)}")
+            except MakoError as e:
+                card = read_card(self.card_path(cid) or paths[0])
+                self.save(card)  # snap back into the folder for its status
+                self.note(f"kanban: can't move {cid} to kanban/{folder.name}: {e} "
+                          f"(moved it back to kanban/{card.path.parent.name})")
+        return handled
+
+    def _apply_file_move(self, card: Card, folder: Path) -> None:
+        """A card file found in `folder`, which disagrees with its status: the same
+        action as the matching command, run as the human."""
+        target = {self.closed_dir: "done", self.discarded_dir: "discarded"}.get(folder, "backlog")
+        if card.human:
+            self._set_human_status(card, target)
+        elif target == "discarded":
+            self._discard(card.id, None, f"Moved to kanban/{folder.name} by hand.", force=False)
+        elif target == "backlog":
+            self._reopen(card.id, note=f"Moved to kanban/{folder.name} by hand.")
+        elif card.status == "in-progress":
+            raise MakoError(f"{card.id} can only be closed by an agent (close_issue / mako close)")
+        elif card.status == "discarded":
+            raise MakoError(f"{card.id} is discarded; reopen it first (move it to kanban/open)")
+        else:
+            raise MakoError(f"a {STATES.get(card.status, card.status)} card can't move to Done")
+
+    def _create_from_text(self, text: str, column: str = "backlog") -> Card:
         tag = re.search(r"\s#(feature|bug|spike)\b", text)
-        text = re.sub(r"\s+#(feature|bug|spike)\b", "", text).strip()
+        human = bool(re.search(r"(^|\s)#human\b", text))
+        text = re.sub(r"(^|\s+)#(feature|bug|spike|human)\b", "", text).strip()
         prefix = re.match(r"(?i)^(feature|bug|spike)\s*[:\-]\s*(.+)$", text)
         if prefix:
             kind, title = prefix.group(1).lower(), prefix.group(2)
         else:
             kind, title = (tag.group(1) if tag else "feature"), text
-        card = self._new(kind, title.strip(), "")
+        card = self._new(kind, title.strip(), "", human=human)
+        if human and column != "backlog":
+            self._set_human_status(card, column)  # a human card stays in the column it was typed in
         self.note(f"board: created {card.id} from new card '{card.title}'")
         return card
 
@@ -533,8 +618,11 @@ class Mako:
         blocked = ""
         if card.status == "backlog" and (b := self.blockers(card)):
             blocked = f" #blocked (waiting on {', '.join(x.split(' ')[0] for x in b)})"
-        unmerged = " #not-merged" if card.status == "done" and card.meta.get("type") == "spike" else ""
-        return f"- [{box}] [[{card.id}]] {card.title} #{card.meta.get('type', 'feature')}{unmerged}{blocked}{who}"
+        spike = card.meta.get("type") == "spike" and not card.human
+        unmerged = " #not-merged" if card.status == "done" and spike else ""
+        human = " #human" if card.human else ""
+        return (f"- [{box}] [[{card.id}]] {card.title} #{card.meta.get('type', 'feature')}"
+                f"{human}{unmerged}{blocked}{who}")
 
     def render_board(self) -> None:
         pos = {cid: i for i, cid in enumerate(self.order)}
@@ -557,7 +645,7 @@ class Mako:
 
     # operations (call through transact)
 
-    def _new(self, kind: str, title: str, description: str, depends=None) -> Card:
+    def _new(self, kind: str, title: str, description: str, depends=None, human: bool = False) -> Card:
         if kind not in TYPES:
             raise MakoError(f"type must be one of {', '.join(TYPES)}")
         if not title.strip():
@@ -567,6 +655,8 @@ class Mako:
         self.check_deps(cid, deps)
         meta = {"id": cid, "type": kind, "title": title.strip(), "depends_on": deps,
                 "status": "backlog", "created": now()}
+        if human:
+            meta["human"] = "true"
         card = Card(self.open_dir / f"{cid}.md", meta,
                     CARD_BODY.format(title=title.strip(), description=description.strip() or "_TBD_"))
         self.save(card)
@@ -580,6 +670,8 @@ class Mako:
                             "only worker slots claim issues")
         card = self.get(cid)
         cid = card.id
+        if card.human:
+            raise MakoError(f"{cid} is a human task (human: true); agents can't claim it")
         if card.status in ("done", "discarded"):
             raise MakoError(f"{cid} is {'closed' if card.status == 'done' else 'discarded'}; reopen it first")
         lock = self.read_lock(cid)
@@ -792,13 +884,14 @@ class Mako:
                           f"run `mako undepend {c.id} {cid}`")
         return card
 
-    def _reopen(self, cid: str) -> Card:
+    def _reopen(self, cid: str, note: str = "") -> Card:
         card = self.get(cid)
         if card.status not in ("done", "discarded"):
             raise MakoError(f"{card.id} is not closed or discarded")
         was = card.status
         shutil.rmtree(self.locks / card.id, ignore_errors=True)
         card.meta.update(status="backlog", claimed_by="", claimed="", closed="", discarded="")
+        self._append(card, "Reopened", None, note)
         self.save(card)
         branch = card.meta.get("branch", "")
         if was == "discarded" and branch and branch_exists(self.project, branch):
@@ -812,8 +905,8 @@ class Mako:
 
     def _edit(self, cid: str, title: str | None, kind: str | None,
               description: str | None, append: str | None,
-              depends=None, add_deps=None, remove_deps=None) -> Card:
-        """Change a Backlog card's title, type, body or dependencies. Holds the issue's claim
+              depends=None, add_deps=None, remove_deps=None, human=None) -> Card:
+        """Change a Backlog card's title, type, body, dependencies or human marker. Holds the issue's claim
         lock while checking and writing, so a claim and an edit can't overlap."""
         card = self.get(cid)
         cid = card.id
@@ -860,6 +953,11 @@ class Mako:
                 deps = [d for d in deps if d not in gone]
                 self.check_deps(cid, deps)
                 card.meta["depends_on"] = deps
+            if human is not None:
+                if human:
+                    card.meta["human"] = "true"
+                else:
+                    card.meta.pop("human", None)
             self.save(card)
         finally:
             shutil.rmtree(lock_dir, ignore_errors=True)
@@ -868,7 +966,7 @@ class Mako:
     def _next_backlog(self, kind: str | None) -> Card:
         pos = {cid: i for i, cid in enumerate(self.order)}
         backlog = [c for c in self.cards()
-                   if c.status == "backlog" and not self.read_lock(c.id)
+                   if c.status == "backlog" and not self.read_lock(c.id) and not c.human
                    and (kind is None or c.meta.get("type") == kind) and not self.blockers(c)]
         if not backlog:
             raise MakoError("no unclaimed, unblocked issues in the backlog"
@@ -878,8 +976,8 @@ class Mako:
 
     # public API
 
-    def new(self, kind, title, description="", depends=None):
-        return self.transact(lambda: self._new(kind, title, description, depends))
+    def new(self, kind, title, description="", depends=None, human=False):
+        return self.transact(lambda: self._new(kind, title, description, depends, human))
 
     def claim(self, cid, agent):
         return self.transact(lambda: self._claim(cid, agent))
@@ -903,9 +1001,9 @@ class Mako:
         return self.transact(lambda: self._reopen(cid))
 
     def edit(self, cid, title=None, kind=None, description=None, append=None,
-             depends=None, add_deps=None, remove_deps=None):
+             depends=None, add_deps=None, remove_deps=None, human=None):
         return self.transact(lambda: self._edit(cid, title, kind, description, append,
-                                                depends, add_deps, remove_deps))
+                                                depends, add_deps, remove_deps, human))
 
     def sync(self):
         return self.transact(lambda: None)
@@ -940,13 +1038,13 @@ def fmt_issue_list(m: Mako, status: str | None = None, include_done: bool = Fals
             continue
         lines.append(f"{name} ({len(lane)})")
         for c in lane:
-            extra = ""
-            if st == "in-progress":
-                extra = f"  [{c.meta.get('claimed_by')}] {c.meta.get('branch')}"
+            extra = "  [human]" if c.human else ""
+            if st == "in-progress" and not c.human:
+                extra += f"  [{c.meta.get('claimed_by')}] {c.meta.get('branch')}"
             elif st == "done" and c.meta.get("merged"):
-                extra = "  [merged]"
-            elif st == "done" and c.meta.get("type") == "spike":
-                extra = "  [not merged]"  # spikes never merge
+                extra += "  [merged]"
+            elif st == "done" and c.meta.get("type") == "spike" and not c.human:
+                extra += "  [not merged]"  # spikes never merge
             if dep := fmt_deps(m, c):
                 extra += f"  [{dep}]"
             lines.append(f"  {c.id}  {c.meta.get('type', ''):<7}  {c.title}{extra}")
@@ -1046,7 +1144,10 @@ MCP_TOOLS = [
          "title": {"type": "string"},
          "description": {"type": "string"},
          "depends_on": {"type": "array", "items": {"type": "string"},
-                        "description": "Issues that must be Done before this one can be claimed."}},
+                        "description": "Issues that must be Done before this one can be claimed."},
+         "human": {"type": "boolean",
+                   "description": "A task for the user, not for agents: agents can't claim or close it; "
+                                  "the user moves it on the board. Agent issues can depend on it."}},
          "required": ["type", "title"]}},
     {"name": "edit_issue",
      "description": "Change a Backlog issue's title, type or description, or append a note. "
@@ -1060,7 +1161,8 @@ MCP_TOOLS = [
          "depends_on": {"type": "array", "items": {"type": "string"},
                         "description": "Replaces the dependency list ([] clears it)."},
          "add_depends": {"type": "array", "items": {"type": "string"}},
-         "remove_depends": {"type": "array", "items": {"type": "string"}}},
+         "remove_depends": {"type": "array", "items": {"type": "string"}},
+         "human": {"type": "boolean", "description": "Mark (true) or unmark (false) it as the user's own task."}},
          "required": ["id"]}},
     {"name": "claim_issue",
      "description": "Claim an issue for your slot: locks it, checks out its branch in your worktree, "
@@ -1115,10 +1217,12 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         card = m.get(args["id"])
         return fmt_show(m, card)
     if name == "create_issue":
-        card = m.new(args["type"], args["title"], args.get("description", ""), args.get("depends_on"))
+        card = m.new(args["type"], args["title"], args.get("description", ""), args.get("depends_on"),
+                     bool(args.get("human")))
         result = f"Created {card.id}: {card.title}"
     elif name == "edit_issue":
-        keys = ("title", "type", "description", "append", "depends_on", "add_depends", "remove_depends")
+        keys = ("title", "type", "description", "append", "depends_on", "add_depends", "remove_depends",
+                "human")
         fields = [args.get(k) for k in keys]
         if all(v is None for v in fields):
             raise MakoError(f"nothing to change: pass {', '.join(keys)}")
@@ -1128,6 +1232,10 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         result = fmt_claim(m.claim(args["id"], agent))
     elif name == "claim_next":
         result = fmt_claim(m.claim_next(agent, args.get("type")))
+    elif name in ("close_issue", "release_issue") and (card := m.get(args["id"])).human:
+        verb = "close" if name == "close_issue" else "release"
+        raise MakoError(f"{card.id} is a human task (human: true); agents can't {verb} it. "
+                        "The user moves it on the board.")
     elif name == "close_issue":
         result = fmt_close(m, m.close(args["id"], agent, args.get("note", ""), gate=True))
     elif name == "request_review":
@@ -1585,6 +1693,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("title", nargs="+")
     s.add_argument("--body", default="", help="description text")
     s.add_argument("--depends", help="comma-separated issues that must be Done first")
+    s.add_argument("--human", action="store_true",
+                   help="your own task: agents can't claim it, and it moves freely on the board")
 
     s = sub.add_parser("list", help="list issues")
     s.add_argument("--all", action="store_true", help="include Done")
@@ -1601,6 +1711,11 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--description-file", help="read the new description from a file")
     s.add_argument("--append", help="add text to the end of the card")
     s.add_argument("--depends", help="replace the dependencies (comma-separated, '' clears)")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--human", dest="human", action="store_const", const=True, default=None,
+                   help="mark it as your own task (agents can't claim it)")
+    g.add_argument("--no-human", dest="human", action="store_const", const=False,
+                   help="hand it back to the agents")
 
     for name, text in (("depend", "make an issue wait for others to be Done"),
                        ("undepend", "remove dependencies from an issue")):
@@ -1662,7 +1777,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         m = Mako(find_root())
         if a.cmd == "new":
-            card = m.new(a.type, " ".join(a.title), a.body, a.depends)
+            card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human)
             out = f"Created {card.id}: {card.title}"
         elif a.cmd == "list":
             m.sync()
@@ -1682,10 +1797,10 @@ def main(argv: list[str] | None = None) -> int:
                     desc = Path(a.description_file).read_text(encoding="utf-8")
                 except OSError as e:
                     raise MakoError(f"can't read {a.description_file}: {e.strerror}") from None
-            if all(v is None for v in (a.title, a.type, desc, a.append, a.depends)):
+            if all(v is None for v in (a.title, a.type, desc, a.append, a.depends, a.human)):
                 out = fmt_show(m, m.get(a.id))
             else:
-                card = m.edit(a.id, a.title, a.type, desc, a.append, a.depends)
+                card = m.edit(a.id, a.title, a.type, desc, a.append, a.depends, human=a.human)
                 out = f"Edited {card.id}: {card.title}"
         elif a.cmd == "guide":
             out = guide(m, a.agent)

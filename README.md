@@ -114,6 +114,33 @@ you have edited is kept, with a note pointing at the new default in `.mako/templ
    last Claude conversation (`claude -c`); a pane with no earlier conversation starts fresh.
    `mako resume <slot|orchestrator>` reopens just one tab.
 
+## Moving cards by hand
+
+You can work the board yourself in Obsidian, by dragging cards on `kanban/board.md` or by moving
+card files between `kanban/open/`, `kanban/closed/` and `kanban/discarded/`. The next `mako`
+command (or agent tool call) picks the change up and prints what it did.
+
+Claiming and closing belong to the agents: dragging a card into In Progress or Done, or moving its
+file into `closed/`, is refused and the card snaps back with a message. What you can do by hand:
+
+| Move | Same as |
+| --- | --- |
+| In Progress back to Backlog (drag) | `mako release` |
+| Done back to Backlog (drag), or a file from `closed/` into `open/` | `mako reopen` |
+| A file from `discarded/` into `open/` | `mako reopen` |
+| A file from `open/` into `discarded/` | `mako discard` (claim freed, branch kept) |
+| Up and down within a column | reorders the board |
+
+If a card is moved as a file and dragged on the board before the next sync, the file move wins.
+A card found in two folders at once is reported and left alone until you delete the extra copy.
+
+### Your own tasks
+
+Mark a card as yours with `mako new feature "Set up the API key" --human`, `mako edit <ID> --human`,
+or by typing it on the board with a `#human` tag. Human cards are a plain kanban: they move to
+any column or folder in any direction, with no locks, branches or merges, and agents can't claim
+or close them. An agent issue can depend on one; it unblocks when you move it to Done.
+
 ## Code review
 
 Mako can stop each issue for your review before it merges. Set `review_command` in

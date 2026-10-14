@@ -33,12 +33,13 @@ def test_spike_is_not_review_gated(ws):
     assert "without merging" in mcp_ok(ws, "agent-a", "close_issue", id="DEMO-0001", note="x")
 
 
-def test_spike_dragged_to_done(ws):
+def test_spike_closed_from_the_cli(ws):
     ok(ws, "new", "spike", "Try it")
     ok(ws, "claim", "DEMO-0001", "--agent", "agent-a")
     commit(ws, "agent-a", "spike.txt", "findings\n")
-    drag(ws, "DEMO-0001", "done")
-    ok(ws, "list")
+    drag(ws, "DEMO-0001", "done")  # refused: closing is for agents (or `mako close`)
+    assert "can only be closed by an agent" in ok(ws, "list")
+    ok(ws, "close", "DEMO-0001")
     assert card(ws, "DEMO-0001")["status"] == "done"
     assert branch_exists(ws, "spike/DEMO-0001-try-it")
     assert not (ws.repo / "spike.txt").exists()
