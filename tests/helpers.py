@@ -7,6 +7,7 @@ Run them with `python scripts/test.py`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -158,6 +159,13 @@ def set_config(ws: Workspace, **values) -> None:
     config = json.loads(path.read_text(encoding="utf-8"))
     config.update(values)
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
+def text_sha256_normalized(data: bytes) -> str:
+    """sha256 of a text file's content with line endings made LF (CRLF, or LF after any
+    run of CRs) and outer newlines stripped, so it's the same whatever git checked out."""
+    text = re.sub(r"\r+\n", "\n", data.decode("utf-8")).strip("\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # --- simulating an agent ---------------------------------------------------------

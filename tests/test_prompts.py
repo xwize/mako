@@ -3,7 +3,7 @@ import re
 import shutil
 
 import pytest
-from helpers import SRC, mako, mcp_instructions, ok, set_config
+from helpers import SRC, mako, mcp_instructions, ok, set_config, text_sha256_normalized
 
 PROMPTS = ("common", "worker", "orchestrator", "review", "cli", "claude-pointer")
 
@@ -94,7 +94,11 @@ def test_upgrade_updates_unedited_and_keeps_edited(ws, tmp_path):
 
 def test_line_endings_alone_are_not_an_edit(ws, tmp_path):
     path = prompts(ws) / "common.txt"
-    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    # LF first: in a core.autocrlf=true checkout the installed file is already CRLF.
+    lf_bytes = path.read_bytes().replace(b"\r\n", b"\n")
+    path.write_bytes(lf_bytes.replace(b"\n", b"\r\n"))
+    default = (SRC / "templates" / "prompts" / "common.txt").read_bytes()
+    assert text_sha256_normalized(path.read_bytes()) == text_sha256_normalized(default)
     new = fake_release(tmp_path, {"common.txt": "\nNEW COMMON LINE\n"})
     assert "updated .mako/prompts/common.txt (new default)" in mako(ws, "init", script=new).out
 
