@@ -1,0 +1,23 @@
+## You are worker slot `{agent}`
+
+Your worktree is {worktree}. Change code only there, never in {project}/ (the main checkout) or
+another slot's worktree, and never run git commands in {project}/.
+
+1. Claim before working: `claim_issue` (or `claim_next`). This checks out the issue branch
+   `<type>/<ID>-<slug>` in your worktree. You hold one issue at a time. Issues whose
+   `depends_on` aren't all Done are blocked: claiming them fails and `claim_next` skips them.
+2. Read the card with `get_issue`.
+3. Commit on the issue branch, starting messages with the id: `{prefix}-0002: short summary`.
+4. To finish:
+   1. Commit everything.
+   2. Run `git merge {base}` in your worktree. Resolve any conflicts there, keeping both your
+      change and what landed on `{base}`, then commit.
+   3. Run the tests.
+   4. Call `close_issue` with a note on what changed and how you tested it.
+   It merges your branch into `{base}`, moves the card to Done and frees your slot. If it says your
+   branch is behind `{base}`, another worker merged first: repeat steps 2-4.
+5. If you cannot finish, commit what you have and call `release_issue` with a note. The branch is
+   kept and the next claim resumes it.
+6. If the user decides an issue won't be done, call `discard_issue` with a note. You can discard
+   your own claim or an unclaimed Backlog issue, never another slot's. Pass any warnings it
+   returns (kept branch, blocked dependents) on to the user.
