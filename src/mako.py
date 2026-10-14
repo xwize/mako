@@ -39,7 +39,7 @@ VERSION = "0.1.0"
 TYPES = ("feature", "bug", "spike")
 COLUMNS = {"backlog": "Backlog", "in-progress": "In Progress", "done": "Done"}
 FIELDS = ("id", "type", "title", "depends_on", "status", "created", "branch",
-          "claimed_by", "claimed", "merged", "closed")
+          "claimed_by", "claimed", "merged", "closed", "discarded")
 LIST_FIELDS = ("depends_on",)
 
 
@@ -232,12 +232,14 @@ class Mako:
         self.kanban = root / "kanban"
         self.open_dir = self.kanban / "open"
         self.closed_dir = self.kanban / "closed"
+        self.discarded_dir = self.kanban / "discarded"
+        self.card_dirs = (self.open_dir, self.closed_dir, self.discarded_dir)
         self.board = self.kanban / "board.md"
         self.locks = self.dir / "locks"
         self.notes: list[str] = []
         self.order: list[str] = []
         self.settings: str | None = None
-        for d in (self.open_dir, self.closed_dir, self.locks):
+        for d in (*self.card_dirs, self.locks):
             d.mkdir(parents=True, exist_ok=True)
 
     # ids & paths
@@ -259,7 +261,7 @@ class Mako:
         return None
 
     def card_path(self, cid: str) -> Path | None:
-        for d in (self.open_dir, self.closed_dir):
+        for d in self.card_dirs:
             p = d / f"{cid}.md"
             if p.is_file():
                 return p
@@ -273,18 +275,20 @@ class Mako:
         return read_card(p)
 
     def cards(self) -> list[Card]:
-        paths = sorted(self.open_dir.glob(f"{self.prefix}-*.md")) + \
-            sorted(self.closed_dir.glob(f"{self.prefix}-*.md"))
+        """Every card, discarded ones included (status "discarded", never on the board)."""
+        paths = [p for d in self.card_dirs for p in sorted(d.glob(f"{self.prefix}-*.md"))]
         return [read_card(p) for p in paths]
 
     def next_id(self) -> str:
-        nums = [int(m.group(1)) for d in (self.open_dir, self.closed_dir)
+        nums = [int(m.group(1)) for d in self.card_dirs
                 for p in d.glob(f"{self.prefix}-*.md")
                 if (m := re.fullmatch(rf"{self.prefix}-(\d+)", p.stem))]
         return f"{self.prefix}-{max(nums, default=0) + 1:04d}"
 
-    def save(self, card: Card, closed: bool) -> None:
-        target = (self.closed_dir if closed else self.open_dir) / f"{card.id}.md"
+    def save(self, card: Card) -> None:
+        """Write the card into the folder for its status: open/, closed/ or discarded/."""
+        folder = {"done": self.closed_dir, "discarded": self.discarded_dir}.get(card.status, self.open_dir)
+        target = folder / f"{card.id}.md"
         write_atomic(target, card.render())
         if card.path != target and card.path.exists():
             card.path.unlink()
@@ -335,12 +339,17 @@ class Mako:
         return [c for c in self.cards() if cid in self.deps(c)]
 
     def check_deps(self, cid: str, deps: list[str]) -> None:
-        """Reject unknown ids, self-dependencies and cycles."""
+        """Reject unknown ids, self-dependencies, new dependencies on discarded
+        issues (they would never be Done) and cycles."""
+        path = self.card_path(cid)
+        current = self.deps(read_card(path)) if path else []
         for d in deps:
             if d == cid:
                 raise MakoError(f"{cid} can't depend on itself")
-            if not self.card_path(d):
+            if not (dpath := self.card_path(d)):
                 raise MakoError(f"{d} not found; {cid} can't depend on it")
+            if d not in current and read_card(dpath).status == "discarded":
+                raise MakoError(f"{d} is discarded; {cid} can't depend on it (`mako reopen {d}` first)")
         graph = {c.id: self.deps(c) for c in self.cards()}
         graph[cid] = deps
         if path := cycle_from(graph, cid):
@@ -352,7 +361,7 @@ class Mako:
         graph = {c.id: self.deps(c) for c in cards}
         problems = []
         for c in cards:
-            if c.status == "done":
+            if c.status in ("done", "discarded"):
                 continue
             if missing := [d for d in graph[c.id] if d not in graph]:
                 problems.append(f"{c.id} depends on unknown {', '.join(missing)}")
@@ -454,6 +463,10 @@ class Mako:
                 self.note(f"board: {cid} has no card file, removed from the board")
                 continue
             card = read_card(path)
+            if card.status == "discarded":
+                self.note(f"board: {cid} is discarded, removed from the board "
+                          f"(`mako reopen {cid}` brings it back)")
+                continue
             if card.status == column:
                 continue
             try:
@@ -528,7 +541,7 @@ class Mako:
                 "status": "backlog", "created": now()}
         card = Card(self.open_dir / f"{cid}.md", meta,
                     CARD_BODY.format(title=title.strip(), description=description.strip() or "_TBD_"))
-        self.save(card, closed=False)
+        self.save(card)
         return card
 
     def _claim(self, cid: str, agent: str | None) -> dict:
@@ -539,8 +552,8 @@ class Mako:
                             "only worker slots claim issues")
         card = self.get(cid)
         cid = card.id
-        if card.status == "done":
-            raise MakoError(f"{cid} is closed; reopen it first")
+        if card.status in ("done", "discarded"):
+            raise MakoError(f"{cid} is {'closed' if card.status == 'done' else 'discarded'}; reopen it first")
         lock = self.read_lock(cid)
         if lock and lock.get("agent") == agent:
             return self._claim_info(card, agent)
@@ -574,7 +587,7 @@ class Mako:
         owner = {"id": cid, "agent": agent, "branch": branch, "worktree": str(wt), "claimed": now()}
         (lock_dir / "owner.json").write_text(json.dumps(owner, indent=2), encoding="utf-8")
         card.meta.update(status="in-progress", branch=branch, claimed_by=agent, claimed=now())
-        self.save(card, closed=False)
+        self.save(card)
         return self._claim_info(card, agent)
 
     def _claim_info(self, card: Card, agent: str) -> dict:
@@ -610,6 +623,8 @@ class Mako:
         branch = card.meta.get("branch", "")
         if card.status == "done":
             raise MakoError(f"{card.id} is already closed")
+        if card.status == "discarded":
+            raise MakoError(f"{card.id} is discarded; `mako reopen {card.id}` it first")
         lock = self.read_lock(card.id)
         wt = self.worktree(lock.get("agent", "")) if lock else None
         if lock:
@@ -628,7 +643,7 @@ class Mako:
             card.meta["merged"] = now()
         card.meta.update(status="done", closed=now())
         self._append(card, "Closing note", agent, note)
-        self.save(card, closed=True)
+        self.save(card)
         return card
 
     def _merge_into_base(self, cid: str, branch: str) -> None:
@@ -650,24 +665,72 @@ class Mako:
         """Back to the Backlog without finishing. The branch is kept, so the
         next claim resumes it."""
         card = self.get(cid)
-        if card.status == "done":
-            raise MakoError(f"{card.id} is closed")
+        if card.status in ("done", "discarded"):
+            raise MakoError(f"{card.id} is {'closed' if card.status == 'done' else 'discarded'}")
         lock = self.read_lock(card.id)
         if lock:
             self._check_owner(card.id, lock, agent, force)
             self._free_slot(card.id, lock, card.meta.get("branch", ""))
         card.meta.update(status="backlog", claimed_by="", claimed="")
         self._append(card, "Released", agent, note)
-        self.save(card, closed=False)
+        self.save(card)
+        return card
+
+    def _discard(self, cid: str, agent: str | None, note: str, force: bool) -> Card:
+        """Drop an issue without merging: the card moves to kanban/discarded/ and
+        off the board. A claim is freed, but its branch is kept, so reopening and
+        claiming again resumes it. Uncommitted work in the slot's worktree is
+        refused; force commits it onto the kept branch instead, so nothing is lost."""
+        card = self.get(cid)
+        cid = card.id
+        if card.status == "done":
+            merged = " and merged" if card.meta.get("merged") else ""
+            raise MakoError(f"{cid} is closed{merged}; it can't be discarded")
+        if card.status == "discarded":
+            raise MakoError(f"{cid} is already discarded")
+        branch = card.meta.get("branch", "")
+        lock = self.read_lock(cid)
+        owner = lock.get("agent") if lock else card.meta.get("claimed_by") or None
+        if lock:
+            self._check_owner(cid, lock, agent, force)
+        elif owner and agent in self.agents and agent != owner and not force:
+            raise MakoError(f"{cid} is claimed by {owner}, not {agent}")
+        if lock:
+            wt = self.worktree(owner or "")
+            if wt.is_dir() and current_branch(wt) == branch and not is_clean(wt):
+                if not force:
+                    raise MakoError(f"{owner}'s worktree has uncommitted changes on {branch}; commit them "
+                                    "first, or use --force to commit them onto the kept branch")
+                git(wt, "add", "-A")
+                git(wt, "commit", "-q", "-m", f"{cid}: uncommitted work saved when the issue was discarded")
+                self.note(f"committed {owner}'s uncommitted changes to {branch}")
+            self._free_slot(cid, lock, branch)
+        was = card.status
+        card.meta.update(status="discarded", discarded=now(), claimed_by="", claimed="")
+        self._append(card, "Discarded", agent, note)
+        self.save(card)
+        if branch and branch_exists(self.project, branch):
+            head = (f"{cid} was in progress ({owner})." if was == "in-progress"
+                    else f"{cid} still had a branch from an earlier claim.")
+            self.note(f"warning: {head} Its branch {branch} was kept and nothing was merged. "
+                      f"Delete it with `git branch -D {branch}` if the work isn't needed.")
+        for c in self.dependents(cid):
+            if c.status in ("backlog", "in-progress"):
+                self.note(f"warning: {c.id} depends on {cid} and is now blocked; "
+                          f"run `mako undepend {c.id} {cid}`")
         return card
 
     def _reopen(self, cid: str) -> Card:
         card = self.get(cid)
-        if card.status != "done":
-            raise MakoError(f"{card.id} is not closed")
+        if card.status not in ("done", "discarded"):
+            raise MakoError(f"{card.id} is not closed or discarded")
+        was = card.status
         shutil.rmtree(self.locks / card.id, ignore_errors=True)
-        card.meta.update(status="backlog", claimed_by="", claimed="", closed="")
-        self.save(card, closed=False)
+        card.meta.update(status="backlog", claimed_by="", claimed="", closed="", discarded="")
+        self.save(card)
+        branch = card.meta.get("branch", "")
+        if was == "discarded" and branch and branch_exists(self.project, branch):
+            self.note(f"{card.id}'s branch {branch} was kept; the next claim resumes it")
         started = [f"{c.id} ({COLUMNS.get(c.status, c.status)})" for c in self.dependents(card.id)
                    if c.status != "backlog"]
         if started:
@@ -682,8 +745,9 @@ class Mako:
         lock while checking and writing, so a claim and an edit can't overlap."""
         card = self.get(cid)
         cid = card.id
-        if card.status == "done":
-            raise MakoError(f"{cid} is closed; `mako reopen {cid}` it first")
+        if card.status in ("done", "discarded"):
+            state = "closed" if card.status == "done" else "discarded"
+            raise MakoError(f"{cid} is {state}; `mako reopen {cid}` it first")
         if kind is not None and kind not in TYPES:
             raise MakoError(f"type must be one of {', '.join(TYPES)}")
         if title is not None and not title.strip():
@@ -724,7 +788,7 @@ class Mako:
                 deps = [d for d in deps if d not in gone]
                 self.check_deps(cid, deps)
                 card.meta["depends_on"] = deps
-            self.save(card, closed=False)
+            self.save(card)
         finally:
             shutil.rmtree(lock_dir, ignore_errors=True)
         return card
@@ -757,6 +821,9 @@ class Mako:
     def release(self, cid, agent=None, note="", force=False):
         return self.transact(lambda: self._release(cid, agent, note, force))
 
+    def discard(self, cid, agent=None, note="", force=False):
+        return self.transact(lambda: self._discard(cid, agent, note, force))
+
     def reopen(self, cid):
         return self.transact(lambda: self._reopen(cid))
 
@@ -785,14 +852,17 @@ class Mako:
 # --- formatting ----------------------------------------------------------------
 
 def fmt_issue_list(m: Mako, status: str | None = None, include_done: bool = False) -> str:
+    """The board's columns, then (with include_done) Done and the discarded issues."""
     cards = m.cards()
     lines = []
-    for st, name in COLUMNS.items():
+    for st, name in [*COLUMNS.items(), ("discarded", "Discarded")]:
         if status and st != status:
             continue
-        if st == "done" and not (include_done or status == "done"):
+        if st in ("done", "discarded") and not (include_done or status == st):
             continue
         lane = [c for c in cards if c.status == st]
+        if st == "discarded" and not lane and status != st:
+            continue
         lines.append(f"{name} ({len(lane)})")
         for c in lane:
             extra = ""
@@ -858,6 +928,8 @@ This workspace uses Mako: a kanban board plus fixed agent slots, each with its o
 - Issues: cards like `{prefix}-0001` in kanban/open and kanban/closed, shown on kanban/board.md (Obsidian).
 - Lifecycle: Backlog -> In Progress (claim) -> Done (close). Closing merges the issue branch into
   `{base}`, so nothing reaches Done unmerged.
+- Discarding (`discard_issue`, `mako discard`) drops an issue that won't be done: it leaves the
+  board for kanban/discarded, nothing is merged and any branch is kept. `mako reopen` undoes it.
 - Mako owns kanban/. Never edit those files directly; use the mako tools. To change a card's
   title, type or description, use `edit_issue` (`mako edit`); it only works while the card is in
   the Backlog.
@@ -884,6 +956,9 @@ another slot's worktree, and never run git commands in {project}/.
    branch is behind `{base}`, another worker merged first: repeat steps 2-4.
 5. If you cannot finish, commit what you have and call `release_issue` with a note. The branch is
    kept and the next claim resumes it.
+6. If the user decides an issue won't be done, call `discard_issue` with a note. You can discard
+   your own claim or an unclaimed Backlog issue, never another slot's. Pass any warnings it
+   returns (kept branch, blocked dependents) on to the user.
 """
 
 GUIDE_ORCHESTRATOR = """
@@ -897,6 +972,8 @@ You run at the workspace root. Worker slots: {agents}.
   `add_depends` / `remove_depends` on `edit_issue`). It can't be claimed until those are Done.
 - Do not claim issues and do not merge: workers merge their own work when they close.
 - `release_issue` returns a stuck issue to the Backlog; `mako reopen <ID>` reopens a closed one.
+- `discard_issue` drops an issue the user doesn't want done (any open issue, with a note). Pass
+  its warnings on: a kept branch to delete, and dependents to `mako undepend`.
 """
 
 GUIDE_CLI = """
@@ -906,7 +983,8 @@ GUIDE_CLI = """
 `mako list [--all]`, `mako status`, `mako show <ID>`, `mako new <feature|bug|spike> "title"`,
 `mako edit <ID> [--title ..] [--type ..] [--description ..|--description-file ..] [--append ..]`,
 `mako new .. --depends <ID,..>`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
-`mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`, `mako reopen <ID>`,
+`mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`,
+`mako discard <ID> [--note ".."] [--force]`, `mako reopen <ID>` (closed or discarded),
 `mako launch [slot]`, `mako resume [slot]` (reopen the panes, each continuing its last
 conversation), `mako guide`, `mako init` (re-run to upgrade the generated files).
 """
@@ -927,7 +1005,7 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_issues", "description": "List issues on the kanban board.",
      "inputSchema": {"type": "object", "properties": {
-         "status": {"type": "string", "enum": list(COLUMNS), "description": "Only this column."}}}},
+         "status": {"type": "string", "enum": [*COLUMNS, "discarded"], "description": "Only this column."}}}},
     {"name": "get_issue", "description": "Read an issue card (frontmatter and body).",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     {"name": "create_issue", "description": "Create a new issue in the Backlog.",
@@ -972,6 +1050,14 @@ MCP_TOOLS = [
          "id": {"type": "string"},
          "note": {"type": "string", "description": "Why, and how far you got."}},
          "required": ["id"]}},
+    {"name": "discard_issue",
+     "description": "Drop an issue that won't be done: moves the card to kanban/discarded and off the board "
+                    "without merging. A claim is freed but its branch is kept. Workers may discard only "
+                    "their own claim or an unclaimed Backlog issue. Relay any warnings to the user.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"},
+         "note": {"type": "string", "description": "Why it is being dropped."}},
+         "required": ["id"]}},
 ]
 
 
@@ -1010,6 +1096,9 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
     elif name == "release_issue":
         card = m.release(args["id"], agent, args.get("note", ""))
         result = f"Released {card.id} back to the Backlog."
+    elif name == "discard_issue":
+        card = m.discard(args["id"], agent, args.get("note", ""))
+        result = f"Discarded {card.id}: moved to kanban/discarded, nothing merged."
     else:
         raise MakoError(f"unknown tool {name}")
     return "\n".join([result, *m.notes])
@@ -1224,7 +1313,7 @@ class Init:
         # re-run with other options.
         self.dir.mkdir(exist_ok=True)
         self.write(self.dir / "config.json", json.dumps(config, indent=2) + "\n")
-        for d in ("kanban/open", "kanban/closed", ".mako/bin", ".mako/agents",
+        for d in ("kanban/open", "kanban/closed", "kanban/discarded", ".mako/bin", ".mako/agents",
                   ".mako/locks", ".mako/worktrees"):
             (self.root / d).mkdir(parents=True, exist_ok=True)
         self.install()
@@ -1411,7 +1500,14 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--force", action="store_true", help="act on another slot's claim")
         s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
-    s = sub.add_parser("reopen", help="move a closed issue back to the backlog")
+    s = sub.add_parser("discard", help="drop an issue without merging (kanban/discarded, branch kept)")
+    s.add_argument("id")
+    s.add_argument("--note", default="")
+    s.add_argument("--force", action="store_true",
+                   help="act on another slot's claim; commit uncommitted work onto the kept branch")
+    s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
+
+    s = sub.add_parser("reopen", help="move a closed or discarded issue back to the backlog")
     s.add_argument("id")
     s = sub.add_parser("launch", help="open Windows Terminal with the agents")
     s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
@@ -1476,6 +1572,9 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "release":
             card = m.release(a.id, a.agent, a.note, a.force)
             out = f"Released {card.id}"
+        elif a.cmd == "discard":
+            card = m.discard(a.id, a.agent, a.note, a.force)
+            out = f"Discarded {card.id}: moved to kanban/discarded, nothing merged."
         elif a.cmd == "reopen":
             out = f"Reopened {m.reopen(a.id).id}"
         elif a.cmd in ("launch", "resume"):
