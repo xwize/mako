@@ -907,7 +907,8 @@ GUIDE_CLI = """
 `mako edit <ID> [--title ..] [--type ..] [--description ..|--description-file ..] [--append ..]`,
 `mako new .. --depends <ID,..>`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
 `mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`, `mako reopen <ID>`,
-`mako guide`, `mako init` (re-run to upgrade the generated files).
+`mako launch [slot]`, `mako resume [slot]` (reopen the panes, each continuing its last
+conversation), `mako guide`, `mako init` (re-run to upgrade the generated files).
 """
 
 
@@ -1061,20 +1062,41 @@ def serve_mcp() -> None:
 
 # --- launching -------------------------------------------------------------------
 
-def launch(m: Mako, who: str | None) -> str:
+def launch(m: Mako, who: str | None, resume: bool = False) -> str:
+    """Open the agents in Windows Terminal. With resume, each one continues its
+    latest conversation (agent.cmd ... resume -> claude -c)."""
     if os.name != "nt":
         raise MakoError("launch currently supports Windows Terminal only")
+    extra = ["resume"] if resume else []
+    verb = "Resumed" if resume else "Opened"
     if who is None:
-        subprocess.Popen(["cmd", "/c", str(m.root / "mako.launch.bat")], cwd=m.root,
+        subprocess.Popen(["cmd", "/c", str(m.root / "mako.launch.bat"), *extra], cwd=m.root,
                          creationflags=subprocess.DETACHED_PROCESS)
-        return "Opened Windows Terminal with all agents"
+        return f"{verb} Windows Terminal with all agents"
     if who != "orchestrator" and who not in m.agents:
         raise MakoError(f"unknown slot '{who}'")
     cwd = m.root if who == "orchestrator" else m.worktree(who)
     subprocess.Popen(["wt", "-w", "0", "new-tab", "--title", who, "--suppressApplicationTitle",
-                      "-d", str(cwd), "cmd", "/k", str(m.dir / "agent.cmd"), who],
+                      "-d", str(cwd), "cmd", "/k", str(m.dir / "agent.cmd"), who, *extra],
                      creationflags=subprocess.DETACHED_PROCESS)
-    return f"Opened a tab for {who}"
+    return f"{verb} a tab for {who}"
+
+
+def has_session(cwd: Path) -> bool:
+    """Whether Claude Code has a conversation that `claude -c` would continue in
+    cwd. Claude keeps them as <config>/projects/<cwd, non-alphanumerics as '-'>/*.jsonl
+    (long names are cut and given a hash suffix, hence the prefix match). If that
+    layout ever changes this says no, and agent.cmd just starts a fresh session."""
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    name = re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
+    projects = config / "projects"
+    if not projects.is_dir():
+        return False
+    for d in projects.iterdir():
+        if d.name == name or (len(name) > 200 and d.name.startswith(name[:200])):
+            if any(d.glob("*.jsonl")):
+                return True
+    return False
 
 
 # --- init ------------------------------------------------------------------------
@@ -1092,12 +1114,14 @@ exec python "$(dirname "$0")/../mako.py" "$@"
 
 AGENT_CMD = """\
 @echo off
-rem Starts Claude for one mako slot:  agent.cmd <slot>
+rem Starts Claude for one mako slot:  agent.cmd <slot> [resume]
 rem "orchestrator" runs at the workspace root; worker slots run in their worktree.
+rem With "resume", Claude continues the slot's latest conversation (claude -c);
+rem Claude keys conversations by directory, so each slot gets its own back.
 setlocal
 set "SLOT=%~1"
 if "%SLOT%"=="" (
-  echo usage: agent.cmd ^<slot^|orchestrator^>
+  echo usage: agent.cmd ^<slot^|orchestrator^> [resume]
   exit /b 1
 )
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
@@ -1106,12 +1130,22 @@ set "PATH=%ROOT%\\.mako\\bin;%PATH%"
 title %SLOT%
 
 if /i "%SLOT%"=="orchestrator" (
-  cd /d "%ROOT%"
-  claude --add-dir "%ROOT%\\{project}" --mcp-config "%ROOT%\\.mako\\agents\\orchestrator.mcp.json" --allowedTools mcp__mako
+  set "DIR=%ROOT%"
+  set "ADD=%ROOT%\\{project}"
 ) else (
-  cd /d "%ROOT%\\.mako\\worktrees\\%SLOT%"
-  claude --add-dir "%ROOT%" --mcp-config "%ROOT%\\.mako\\agents\\%SLOT%.mcp.json" --allowedTools mcp__mako
+  set "DIR=%ROOT%\\.mako\\worktrees\\%SLOT%"
+  set "ADD=%ROOT%"
 )
+cd /d "%DIR%"
+
+rem Only continue when there is a conversation to continue; otherwise start fresh.
+set "CONTINUE="
+if /i "%~2"=="resume" (
+  python "%~dp0mako.py" session >nul 2>&1 && set "CONTINUE=-c"
+)
+if /i "%~2"=="resume" if not defined CONTINUE echo No earlier conversation for %SLOT%; starting a new one.
+
+claude %CONTINUE% --add-dir "%ADD%" --mcp-config "%ROOT%\\.mako\\agents\\%SLOT%.mcp.json" --allowedTools mcp__mako
 """
 
 LAUNCH_BAT = """\
@@ -1126,6 +1160,9 @@ rem   pane 0: orchestrator
 rem
 rem Each split names the pane it splits with focus-pane, so the layout never
 rem depends on which pane happens to have focus when wt processes the command.
+rem
+rem "mako.launch.bat resume" (mako resume) passes "resume" on to every pane's
+rem agent.cmd, so each agent continues its latest conversation.
 
 for %%I in ("%~dp0.") do set "ROOT=%%~fI"
 set "WT=%ROOT%\\.mako\\worktrees"
@@ -1141,7 +1178,7 @@ def launch_bat(agents: list[str]) -> str:
     # Each slot splits the pane to its left vertically; wt's --size is the share
     # the new pane takes, so pane k-1 hands over (n-k+1)/(n-k+2) of its width,
     # leaving every column 1/(n+1) of the window.
-    pane = '--title {0} --suppressApplicationTitle -d "{1}" cmd /k "%AGENT%" {0}'
+    pane = '--title {0} --suppressApplicationTitle -d "{1}" cmd /k "%AGENT%" {0} %*'
     cmds = ["new-tab " + pane.format("orchestrator", "%ROOT%")]
     n = len(agents)
     for k, slot in enumerate(agents, 1):
@@ -1199,7 +1236,8 @@ class Init:
         Mako(self.root).sync()  # renders kanban/board.md from the cards
         self.log.append(f"\nMako workspace ready: {self.root}\n"
                         f"  Open this folder as an Obsidian vault to see kanban/board.md.\n"
-                        f"  Run mako.launch.bat to start the orchestrator and {', '.join(agents) or 'no slots'}.")
+                        f"  Run mako.launch.bat to start the orchestrator and {', '.join(agents) or 'no slots'}.\n"
+                        f"  Later, `mako resume` reopens them, each continuing its last conversation.")
         return "\n".join(self.log)
 
     def config(self, project, prefix, agents, base) -> dict:
@@ -1377,12 +1415,17 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("id")
     s = sub.add_parser("launch", help="open Windows Terminal with the agents")
     s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
+    s = sub.add_parser("resume", help="like launch, but each agent continues its last conversation")
+    s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
+    sub.add_parser("session", help="exit 0 if Claude has a conversation to continue here (agent.cmd)")
     sub.add_parser("mcp", help="run the MCP server on stdio")
 
     a = p.parse_args(argv)
     if a.cmd == "mcp":
         serve_mcp()
         return 0
+    if a.cmd == "session":
+        return 0 if has_session(Path.cwd().resolve()) else 1
 
     sys.stdout.reconfigure(encoding="utf-8")
     try:
@@ -1435,8 +1478,8 @@ def main(argv: list[str] | None = None) -> int:
             out = f"Released {card.id}"
         elif a.cmd == "reopen":
             out = f"Reopened {m.reopen(a.id).id}"
-        elif a.cmd == "launch":
-            out = launch(m, a.who)
+        elif a.cmd in ("launch", "resume"):
+            out = launch(m, a.who, resume=a.cmd == "resume")
         for n in m.notes:
             print(n)
         print(out)
