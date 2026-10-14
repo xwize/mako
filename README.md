@@ -114,17 +114,18 @@ you have edited is kept, with a note pointing at the new default in `.mako/templ
    last Claude conversation (`claude -c`); a pane with no earlier conversation starts fresh.
    `mako resume <slot|orchestrator>` reopens just one tab.
 
-### Code review before merging (optional)
+## Code review
 
-Set `review_command` in `.mako/config.json` to any review or diff tool, for example:
+Mako can stop each issue for your review before it merges. Set `review_command` in
+`.mako/config.json` to the tool to open, for example [difit](https://github.com/yoshiko-pg/difit):
 
 ```json
 "review_command": "npx difit HEAD {base}"
 ```
 
-Placeholders: `{base}`, `{branch}`, `{id}`, `{worktree}`. When it is set, workers call
-`request_review` once their branch is ready. Mako runs the command in their worktree, without
-waiting for it (output in `.mako/logs/<ID>.review.log`), and the worker waits for you to reply
-"approve" or send comments in its pane. `close_issue` refuses a branch with commits that weren't
-reviewed. `mako close` from the CLI is never gated, and `mako review <ID>` reopens the tool. Leave
-it empty (`""`, the default) for no review step.
+When a worker's branch is ready, it opens the review and waits. Reply "approve" in its pane, or
+paste your comments and it fixes them and asks again. Nothing merges until the latest commits
+have been reviewed. Leave it empty (`""`, the default) to turn review off.
+
+The command can use `{base}`, `{branch}`, `{id}` and `{worktree}`. Its output goes to
+`.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it.
