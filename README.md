@@ -89,3 +89,6 @@ touches your cards, config or repo history.
 2. Make a first issue: `.\mako.cmd new feature "My first feature"`.
 3. Run `.\mako.launch.bat`. The orchestrator opens on the left and the worker slots on the right.
    Ask a worker to "pick up MYPROJ-0001".
+4. Closed the terminal? `.\mako.cmd resume` reopens the same layout with every pane continuing its
+   last Claude conversation (`claude -c`); a pane with no earlier conversation starts fresh.
+   `mako resume <slot|orchestrator>` reopens just one tab.
