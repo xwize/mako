@@ -110,6 +110,24 @@ def unmerged_commits(cwd: Path, branch: str, base: str) -> int:
     return int(git(cwd, "rev-list", "--count", f"{base}..{branch}"))
 
 
+def spawn_detached(cmd: str, cwd: Path, out) -> None:
+    """Start a shell command and don't wait for it. Through the shell so things
+    like npx (a .cmd on Windows) resolve; stdin is DEVNULL so it can never read
+    the MCP server's stdin, and output goes to `out`. On Windows it gets a
+    hidden console of its own (console children stay hidden too) and its own
+    process group, and leaves the caller's job if allowed, so it outlives the
+    MCP server."""
+    kw = dict(cwd=str(cwd), shell=True, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+    if os.name != "nt":
+        subprocess.Popen(cmd, start_new_session=True, **kw)
+        return
+    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
+    except OSError:  # the job doesn't allow breakaway
+        subprocess.Popen(cmd, creationflags=flags, **kw)
+
+
 # --- cards -----------------------------------------------------------------
 
 class Card:
@@ -230,6 +248,8 @@ class Mako:
         self.prefix = self.config["prefix"].upper()
         self.base = self.config.get("base_branch", "main")
         self.agents = list(self.config.get("agents", []))
+        # Empty means no review step: no request_review, no gate on close_issue.
+        self.review_command = str(self.config.get("review_command") or "").strip()
         self.kanban = root / "kanban"
         self.open_dir = self.kanban / "open"
         self.closed_dir = self.kanban / "closed"
@@ -616,10 +636,12 @@ class Mako:
         if note.strip():
             card.body = card.body.rstrip("\n") + f"\n\n## {heading} ({agent or 'human'}, {now()})\n\n{note.strip()}\n"
 
-    def _close(self, cid: str, agent: str | None, note: str, force: bool) -> Card:
+    def _close(self, cid: str, agent: str | None, note: str, force: bool, gate: bool = False) -> Card:
         """Finish an issue. If its branch has commits they are merged into the
         base branch first; the branch must already contain the base branch, so
-        conflicts are resolved by the worker in its own worktree, never here."""
+        conflicts are resolved by the worker in its own worktree, never here.
+        With gate (the agents' close_issue) and a review_command configured, the
+        branch's HEAD must be the commit the last request_review covered."""
         card = self.get(cid)
         branch = card.meta.get("branch", "")
         if card.status == "done":
@@ -634,6 +656,10 @@ class Mako:
                 raise MakoError(f"{lock.get('agent')}'s worktree has uncommitted changes on {branch}; "
                                 "commit them first")
         pending = unmerged_commits(self.project, branch, self.base)
+        if gate and self.review_command and lock and pending and not force:
+            head = git(self.project, "rev-parse", branch)
+            if lock.get("reviewed") != head:
+                raise MakoError(f"call `request_review` first (no review for {head[:7]})")
         if pending:
             self._merge_into_base(card.id, branch)
         if lock:
@@ -676,6 +702,38 @@ class Mako:
         self._append(card, "Released", agent, note)
         self.save(card)
         return card
+
+    def _review(self, cid: str, agent: str | None) -> dict:
+        """Launch review_command for a claimed issue, detached, and record the
+        commit it covers on the claim (cleared with the claim on close/release)."""
+        if not self.review_command:
+            raise MakoError('no review step: set "review_command" in .mako/config.json')
+        card = self.get(cid)
+        cid = card.id
+        lock = self.read_lock(cid)
+        if card.status != "in-progress" or not lock:
+            raise MakoError(f"{cid} is not in progress; only a claimed issue can be reviewed")
+        self._check_owner(cid, lock, agent, force=False)
+        branch = card.meta.get("branch", "")
+        wt = self.worktree(lock.get("agent", ""))
+        if not branch_exists(self.project, branch) or not wt.is_dir():
+            raise MakoError(f"{cid} has no branch or worktree to review")
+        if not is_clean(wt):
+            raise MakoError(f"{lock.get('agent')}'s worktree has uncommitted changes; "
+                            "commit them first, the review covers commits")
+        head = git(self.project, "rev-parse", branch)
+        cmd = self.review_command
+        for key, value in {"base": self.base, "branch": branch, "id": cid, "worktree": str(wt)}.items():
+            cmd = cmd.replace("{" + key + "}", value)
+        log = self.dir / "logs" / f"{cid}.review.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "w", encoding="utf-8") as out:
+            out.write(f"# {now()}  {cid} at {head}\n# cwd: {wt}\n$ {cmd}\n")
+            out.flush()
+            spawn_detached(cmd, wt, out)
+        lock.update(reviewed=head, review_requested=now())
+        (self.locks / cid / "owner.json").write_text(json.dumps(lock, indent=2), encoding="utf-8")
+        return {"id": cid, "sha": head, "log": str(log), "command": cmd}
 
     def _discard(self, cid: str, agent: str | None, note: str, force: bool) -> Card:
         """Drop an issue without merging: the card moves to kanban/discarded/ and
@@ -816,8 +874,11 @@ class Mako:
     def claim_next(self, agent, kind=None):
         return self.transact(lambda: self._claim(self._next_backlog(kind).id, agent))
 
-    def close(self, cid, agent=None, note="", force=False):
-        return self.transact(lambda: self._close(cid, agent, note, force))
+    def close(self, cid, agent=None, note="", force=False, gate=False):
+        return self.transact(lambda: self._close(cid, agent, note, force, gate))
+
+    def review(self, cid, agent=None):
+        return self.transact(lambda: self._review(cid, agent))
 
     def release(self, cid, agent=None, note="", force=False):
         return self.transact(lambda: self._release(cid, agent, note, force))
@@ -963,8 +1024,22 @@ GUIDE_CLI = """
 `mako new .. --depends <ID,..>`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
 `mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`,
 `mako discard <ID> [--note ".."] [--force]`, `mako reopen <ID>` (closed or discarded),
-`mako launch [slot]`, `mako resume [slot]` (reopen the panes, each continuing its last
+{review_cli}`mako launch [slot]`, `mako resume [slot]` (reopen the panes, each continuing its last
 conversation), `mako guide`, `mako init` (re-run to upgrade the generated files).
+"""
+
+
+GUIDE_REVIEW = """
+## Code review
+
+This workspace reviews each issue before it merges. When your branch is ready to close
+(everything committed, `{base}` merged in, tests passing):
+
+1. Call `request_review`. It opens the review for the user. End your turn and wait.
+2. The user replies "approve" or sends comments. On comments, fix them, commit and call
+   `request_review` again.
+3. Only after the user approves, call `close_issue`. It refuses while the branch has commits
+   the last `request_review` didn't cover.
 """
 
 
@@ -972,11 +1047,15 @@ def guide(m: "Mako", agent: str | None) -> str:
     values = {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
               "agent": agent, "agents": ", ".join(m.agents),
               "worktree": m.worktree(agent) if agent else ""}
+    # Review text appears only when review_command is set; otherwise the guide is as before.
+    cli = GUIDE_CLI.format(**values, review_cli="`mako review <ID>` (reopen the review tool),\n"
+                           if m.review_command else "")
     if agent not in m.agents:
-        return (GUIDE_COMMON + GUIDE_ORCHESTRATOR + GUIDE_CLI).format(**values)
-    # The worker part is user text: it never goes through format().
-    return (GUIDE_COMMON.format(**values) + "\n" + prompt(m, "worker", values) + "\n"
-            + GUIDE_CLI.format(**values))
+        return (GUIDE_COMMON + GUIDE_ORCHESTRATOR).format(**values) + cli
+    # The worker part is user text: it never goes through format(). Code review is
+    # Mako's text, added after it, so worker.txt never needs editing for it.
+    review = GUIDE_REVIEW.format(**values) if m.review_command else ""
+    return GUIDE_COMMON.format(**values) + "\n" + prompt(m, "worker", values) + "\n" + review + cli
 
 
 def prompt(m: "Mako", name: str, values: dict) -> str:
@@ -1046,6 +1125,11 @@ MCP_TOOLS = [
          "id": {"type": "string"},
          "note": {"type": "string", "description": "Why, and how far you got."}},
          "required": ["id"]}},
+    {"name": "request_review",
+     "description": "Open the configured review tool on your claimed issue's branch for the user, "
+                    "and record the commit it covers. Commit first. Then end your turn and wait for "
+                    "the user to approve or send comments.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     {"name": "discard_issue",
      "description": "Drop an issue that won't be done: moves the card to kanban/discarded and off the board "
                     "without merging. A claim is freed but its branch is kept. Workers may discard only "
@@ -1088,7 +1172,12 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
     elif name == "claim_next":
         result = fmt_claim(m.claim_next(agent, args.get("type")))
     elif name == "close_issue":
-        result = fmt_close(m.close(args["id"], agent, args.get("note", "")))
+        result = fmt_close(m.close(args["id"], agent, args.get("note", ""), gate=True))
+    elif name == "request_review":
+        info = m.review(args["id"], agent)
+        result = (f"Review opened for {info['id']} ({info['sha'][:7]}). End your turn and wait. "
+                  'The user will reply "approve" or send comments; on comments, fix them, commit and '
+                  f"call request_review again. Log: {info['log']}")
     elif name == "release_issue":
         card = m.release(args["id"], agent, args.get("note", ""))
         result = f"Released {card.id} back to the Backlog."
@@ -1130,7 +1219,8 @@ def serve_mcp() -> None:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            result = {"tools": MCP_TOOLS}
+            review = bool(Mako(root).review_command)  # read per call: config.json may change
+            result = {"tools": [t for t in MCP_TOOLS if review or t["name"] != "request_review"]}
         elif method == "tools/call":
             try:
                 text, is_error = mcp_call(params.get("name"), params.get("arguments") or {}, agent), False
@@ -1339,6 +1429,7 @@ class Init:
                 raise MakoError(f"this workspace's project is '{config['project']}', not '{project}'")
             if any(v is not None for v in (prefix, agents, base)):
                 self.log.append("kept existing .mako/config.json (edit it to change prefix, agents or base)")
+            config.setdefault("review_command", "")  # listed so it can be found; never changed
             return config
         if not project:
             raise MakoError("usage: mako init <project_name>")
@@ -1353,7 +1444,8 @@ class Init:
                 raise MakoError(f"bad agent slot name '{a}'")
         if len(set(agents)) != len(agents):
             raise MakoError("agent slot names must be unique")
-        return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents}
+        return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
+                "review_command": ""}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
         """Write only if the content changed, and log it."""
@@ -1530,6 +1622,10 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--force", action="store_true", help="act on another slot's claim")
         s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
+    s = sub.add_parser("review", help="open the review_command from config.json on a claimed issue")
+    s.add_argument("id")
+    s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
+
     s = sub.add_parser("discard", help="drop an issue without merging (kanban/discarded, branch kept)")
     s.add_argument("id")
     s.add_argument("--note", default="")
@@ -1602,6 +1698,9 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "release":
             card = m.release(a.id, a.agent, a.note, a.force)
             out = f"Released {card.id}"
+        elif a.cmd == "review":
+            info = m.review(a.id, a.agent)
+            out = f"Opened the review for {info['id']} ({info['sha'][:7]}): {info['command']}\n  log: {info['log']}"
         elif a.cmd == "discard":
             card = m.discard(a.id, a.agent, a.note, a.force)
             out = f"Discarded {card.id}: moved to kanban/discarded, nothing merged."
