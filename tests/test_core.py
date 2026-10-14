@@ -19,8 +19,8 @@ def test_core_loop(ws):
     assert git(ws, "log", "-1", "--format=%s", "main") == "Merge DEMO-0001: First feature"
     assert (ws.repo / "hello.txt").is_file()
     assert not branch_exists(ws, "feature/DEMO-0001-first-feature")
-    # The slot is idle: no lock, detached at main.
-    assert not (ws.root / ".mako" / "locks" / "DEMO-0001").exists()
+    # The slot is idle, detached at main.
+    assert "current claim: none" in mcp_ok(ws, "agent-a", "whoami")
     wt = ws.worktree("agent-a")
     assert git(ws, "rev-parse", "--abbrev-ref", "HEAD", cwd=wt) == "HEAD"
     assert git(ws, "rev-parse", "HEAD", cwd=wt) == git(ws, "rev-parse", "main")

@@ -5,11 +5,6 @@ import pytest
 from helpers import Workspace, isolated_env, new_workspace
 
 
-def pytest_addoption(parser):
-    parser.addoption("--update-snapshots", action="store_true",
-                     help="rewrite tests/snapshots/ from the current output instead of comparing")
-
-
 @pytest.fixture(scope="session")
 def base_env(tmp_path_factory) -> dict:
     return isolated_env(tmp_path_factory.mktemp("home"))

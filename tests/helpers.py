@@ -20,7 +20,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src"
 MAKO = SRC / "mako.py"
-SNAPSHOTS = Path(__file__).resolve().parent / "snapshots"
 NOW = "2026-01-01 00:00"
 GIT_DATE = "2026-01-01T00:00:00+00:00"
 PROJECT, PREFIX = "demo", "DEMO"
@@ -60,12 +59,6 @@ class Workspace:
 
     def worktree(self, slot: str) -> Path:
         return self.root / ".mako" / "worktrees" / slot
-
-    def normalize(self, text: str) -> str:
-        """Replace this workspace's absolute path so output can be compared across runs."""
-        for form in (json.dumps(str(self.root))[1:-1], str(self.root), self.root.as_posix()):
-            text = text.replace(form, "<WS>")
-        return text.replace("\r\n", "\n")
 
 
 # --- environment -----------------------------------------------------------------
@@ -289,17 +282,3 @@ def board(ws: Workspace) -> dict[str, list[str]]:
         elif column and (m := re.match(r"^- \[[ xX]\] .*?\[\[([A-Z]+-\d+)\]\]", ln)):
             cols[column].append(m.group(1))
     return cols
-
-
-def snapshot(request, name: str, text: str) -> None:
-    """Compare text with tests/snapshots/<name>; --update-snapshots rewrites it."""
-    path = SNAPSHOTS / name
-    text = text.replace("\r\n", "\n")
-    if request.config.getoption("--update-snapshots"):
-        path.parent.mkdir(exist_ok=True)
-        path.write_bytes(text.encode("utf-8"))
-        return
-    assert path.is_file(), f"no snapshot {name}; run `python scripts/test.py --update-snapshots`"
-    expected = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-    assert text == expected, (f"{name} changed; if that's intended, run "
-                              f"`python scripts/test.py --update-snapshots`")

@@ -1,8 +1,7 @@
 """Run Mako's checks: ruff (if available), then the regression tests in tests/.
 
-    python scripts/test.py                     everything
-    python scripts/test.py -k claim            extra arguments go to pytest
-    python scripts/test.py --update-snapshots  rewrite tests/snapshots/ (deliberately, after a change)
+    python scripts/test.py             everything
+    python scripts/test.py -k claim    extra arguments go to pytest
 
 Development only: pytest and ruff are not needed to install or run Mako. pytest
 is used from this Python if installed (`pip install pytest`), otherwise through

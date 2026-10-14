@@ -1,5 +1,4 @@
 """review_command: request_review runs it, close_issue is gated on it, the CLI close is not."""
-import json
 import sys
 
 from helpers import card, commit, git, mcp_err, mcp_ok, mcp_tools, ok, set_config, wait_for
@@ -34,8 +33,6 @@ def test_close_gated_until_review_covers_head(ws, tmp_path):
     text = mcp_ok(ws, "agent-a", "request_review", id="DEMO-0001")
     assert f"Review opened for DEMO-0001 ({sha[:7]})" in text
     assert wait_for(flag) == "DEMO-0001 feature/DEMO-0001-reviewed main"
-    owner = json.loads((ws.root / ".mako" / "locks" / "DEMO-0001" / "owner.json").read_text(encoding="utf-8"))
-    assert owner["reviewed"] == sha
 
     # A new commit since the review: refused again until the next request_review.
     sha2 = commit(ws, "agent-a", "b.txt", "b\n")

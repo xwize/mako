@@ -155,10 +155,6 @@ folder, with the clock (`MAKO_NOW`) and git config fixed, so they never touch a 
 run gives the same result every time. `tests/helpers.py` has the helpers for acting as the user
 (board drags, typed cards, hand edits) and as an agent (commits, MCP calls).
 
-`tests/snapshots/` holds the expected guides, board and launch files. After a deliberate change
-to any of them, rewrite them with `python scripts/test.py --update-snapshots` and review their
-diff with the rest of the change.
-
 ### Lint
 
 `scripts/test.py` runs it, or on its own:
