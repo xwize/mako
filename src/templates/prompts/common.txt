@@ -10,6 +10,9 @@ This workspace uses Mako: a kanban board plus fixed agent slots, each with its o
   kept).
 - Discarding (`discard_issue`, `mako discard`) drops an issue that won't be done: it leaves the
   board for kanban/discarded, nothing is merged and any branch is kept. `mako reopen` undoes it.
-- Mako owns kanban/. Never edit those files directly; use the mako tools. To change a card's
-  title, type or description, use `edit_issue` (`mako edit`); it only works while the card is in
-  the Backlog.
+- Mako owns kanban/. Never edit or move those files yourself (moving a card file between the
+  kanban folders discards or reopens it); use the mako tools. To change a card's title, type or
+  description, use `edit_issue` (`mako edit`); it only works while the card is in the Backlog.
+- Cards marked `human: true` (`[human]` in `list_issues`) are the user's own tasks. Agents can't
+  claim, close or release them; the user moves them on the board. An issue that depends on one
+  unblocks when the user moves it to Done.

@@ -114,6 +114,13 @@ you have edited is kept, with a note pointing at the new default in `.mako/templ
    last Claude conversation (`claude -c`); a pane with no earlier conversation starts fresh.
    `mako resume <slot|orchestrator>` reopens just one tab.
 
+## Your own tasks
+
+Mark a card as yours with `mako new feature "Set up the API key" --human`, `mako edit <ID> --human`,
+or by typing it on the board with a `#human` tag. Human cards are a plain kanban: drag them to any
+column, with no locks, branches or merges, and agents can't claim or close them. An agent issue can
+depend on one; it unblocks when you move it to Done.
+
 ## Code review
 
 Mako can stop each issue for your review before it merges. Set `review_command` in

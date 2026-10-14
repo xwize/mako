@@ -14,20 +14,26 @@ def test_drag_in_progress_to_backlog_releases(ws):
     assert board(ws)["backlog"] == ["DEMO-0001"]
 
 
-def test_drag_in_progress_to_done_closes_and_merges(ws):
+def test_drag_in_progress_to_done_is_refused(ws):
+    # Closing belongs to agents (close_issue / mako close); a drag doesn't merge.
     ok(ws, "new", "feature", "One")
     mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0001")
     commit(ws, "agent-a", "a.txt", "a\n")
     drag(ws, "DEMO-0001", "done")
-    assert "board: DEMO-0001 moved to Done" in ok(ws, "list")
-    assert card(ws, "DEMO-0001")["status"] == "done"
-    assert (ws.repo / "a.txt").is_file()
+    out = ok(ws, "list")
+    assert ("can't move DEMO-0001 to Done: DEMO-0001 can only be closed by an agent "
+            "(close_issue / mako close) (moved it back)") in out
+    c = card(ws, "DEMO-0001")
+    assert (c["status"], c["_folder"], c["claimed_by"]) == ("in-progress", "open", "agent-a")
+    assert not (ws.repo / "a.txt").exists()
+    assert board(ws)["in-progress"] == ["DEMO-0001"]
 
 
 def test_drag_backlog_to_in_progress_snaps_back(ws):
     ok(ws, "new", "feature", "One")
     drag(ws, "DEMO-0001", "in-progress")
     out = ok(ws, "list")
+    assert "can only be claimed by an agent (claim_issue / mako claim)" in out
     assert "can't move DEMO-0001 to In Progress" in out and "moved it back" in out
     assert card(ws, "DEMO-0001")["status"] == "backlog"
     assert board(ws) == {"backlog": ["DEMO-0001"], "in-progress": [], "done": []}
