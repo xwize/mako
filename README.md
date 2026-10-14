@@ -75,6 +75,7 @@ touches your cards, config or repo history.
   CLAUDE.md                      your project's instructions for Claude
   kanban/board.md                the board (Obsidian Kanban plugin)
   kanban/open/, kanban/closed/   one card per issue
+  kanban/discarded/              issues dropped with `mako discard` (off the board; `mako reopen` undoes)
   <project>/                     your git repo, on the base branch
   mako.cmd                       the CLI:  .\mako.cmd new feature "title"
   mako.launch.bat                Windows Terminal: orchestrator + one pane per slot
