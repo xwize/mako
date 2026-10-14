@@ -33,7 +33,7 @@ import shutil
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -62,7 +62,8 @@ def write_atomic(path: Path, text: str) -> None:
     # Dot-prefixed temp file so Obsidian never indexes it. Retry the replace
     # because Obsidian can briefly hold the target open on Windows.
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8", newline="\n")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:  # write_text(newline=) is 3.10+
+        f.write(text)
     for _ in range(20):
         try:
             os.replace(tmp, path)
@@ -77,7 +78,7 @@ def write_atomic(path: Path, text: str) -> None:
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     # stdin is DEVNULL so git can never eat the MCP server's stdin.
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
-                          text=True, stdin=subprocess.DEVNULL)
+                          text=True, stdin=subprocess.DEVNULL, check=False)
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -186,10 +187,8 @@ def read_card(path: Path) -> Card:
             meta[key] = [v.strip().strip("\"'") for v in value[1:-1].split(",") if v.strip()]
             continue
         if value.startswith('"'):
-            try:
+            with suppress(ValueError):
                 value = json.loads(value)
-            except ValueError:
-                pass
         meta[key] = value
     return Card(path, meta, m.group(2))
 
@@ -374,8 +373,8 @@ class Mako:
                 raise MakoError(f"{d} is discarded; {cid} can't depend on it (`mako reopen {d}` first)")
         graph = {c.id: self.deps(c) for c in self.cards()}
         graph[cid] = deps
-        if path := cycle_from(graph, cid):
-            raise MakoError(f"that would make a dependency cycle: {' -> '.join(path)}")
+        if cycle := cycle_from(graph, cid):
+            raise MakoError(f"that would make a dependency cycle: {' -> '.join(cycle)}")
 
     def dep_problems(self) -> list[str]:
         """Bad dependencies typed into cards by hand (missing ids, cycles)."""
@@ -403,8 +402,10 @@ class Mako:
             return {"id": cid, "agent": "?"}
 
     def all_locks(self) -> list[dict]:
-        return [self.read_lock(d.name) for d in sorted(self.locks.iterdir())
-                if d.is_dir() and not d.name.startswith("_")]
+        # A lock can vanish between listing and reading it (a close elsewhere): skipped.
+        locks = (self.read_lock(d.name) for d in sorted(self.locks.iterdir())
+                 if d.is_dir() and not d.name.startswith("_"))
+        return [lk for lk in locks if lk is not None]
 
     def lock_of(self, agent: str) -> dict | None:
         return next((lk for lk in self.all_locks() if lk.get("agent") == agent), None)
@@ -426,7 +427,7 @@ class Mako:
                     continue
                 if time.time() - start > timeout:
                     raise MakoError("timed out waiting for .mako/locks/_board "
-                                    "(delete it if no mako command is running)")
+                                    "(delete it if no mako command is running)") from None
                 time.sleep(0.1)
         try:
             yield
@@ -997,7 +998,7 @@ def fmt_slots(m: Mako) -> str:
 # Everything agents are told lives in .mako/prompts/*.txt (shipped as templates/prompts/)
 # so users can edit it. The guide is common + worker or orchestrator (+ review) + cli.
 
-def guide(m: "Mako", agent: str | None) -> str:
+def guide(m: Mako, agent: str | None) -> str:
     values = {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
               "agent": agent, "agents": ", ".join(m.agents),
               "worktree": m.worktree(agent) if agent else "",
@@ -1010,7 +1011,7 @@ def guide(m: "Mako", agent: str | None) -> str:
     return "\n\n".join(prompt(m, n, values) for n in names) + "\n"
 
 
-def prompt(m: "Mako", name: str, values: dict) -> str:
+def prompt(m: Mako, name: str, values: dict) -> str:
     """The user-editable text in .mako/prompts/<name>.txt, read fresh each time.
     Only the guide's own placeholders are substituted (plain replace, so other
     braces pass through). A missing file says so instead of hiding it."""
@@ -1209,6 +1210,10 @@ def launch(m: Mako, who: str | None, resume: bool = False) -> str:
     return f"{verb} a tab for {who}"
 
 
+# Claude Code cuts project folder names to this many characters (plus a hash suffix).
+CLAUDE_PROJECT_NAME_MAX = 200
+
+
 def has_session(cwd: Path) -> bool:
     """Whether Claude Code has a conversation that `claude -c` would continue in
     cwd. Claude keeps them as <config>/projects/<cwd, non-alphanumerics as '-'>/*.jsonl
@@ -1219,10 +1224,11 @@ def has_session(cwd: Path) -> bool:
     projects = config / "projects"
     if not projects.is_dir():
         return False
+    cut = CLAUDE_PROJECT_NAME_MAX
     for d in projects.iterdir():
-        if d.name == name or (len(name) > 200 and d.name.startswith(name[:200])):
-            if any(d.glob("*.jsonl")):
-                return True
+        same = d.name == name or (len(name) > cut and d.name.startswith(name[:cut]))
+        if same and any(d.glob("*.jsonl")):
+            return True
     return False
 
 
@@ -1313,7 +1319,9 @@ def launch_bat(agents: list[str]) -> str:
     names = ["orchestrator", *agents]
     width = max(map(len, names)) + 2
     rule = "rem   +" + "+".join("-" * width for _ in names) + "+"
-    row = lambda cells: "rem   |" + "|".join(c.center(width) for c in cells) + "|"
+
+    def row(cells):
+        return "rem   |" + "|".join(c.center(width) for c in cells) + "|"
     blank = row([""] * len(names))
     diagram = "\n".join([rule, blank, row(names), blank, rule])
     panes = "\n".join(f"rem   pane {k}: {slot}" for k, slot in enumerate(agents, 1)) or "rem   (no slots)"
