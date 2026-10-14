@@ -947,11 +947,7 @@ another slot's worktree, and never run git commands in {project}/.
 2. Read the card with `get_issue`.
 3. Commit on the issue branch, starting messages with the id: `{prefix}-0002: short summary`.
 4. To finish:
-   1. Commit everything.
-   2. Run `git merge {base}` in your worktree. Resolve any conflicts there, keeping both your
-      change and what landed on `{base}`, then commit.
-   3. Run the tests.
-   4. Call `close_issue` with a note on what changed and how you tested it.
+   {{worker.finish}}
    It merges your branch into `{base}`, moves the card to Done and frees your slot. If it says your
    branch is behind `{base}`, another worker merged first: repeat steps 2-4.
 5. If you cannot finish, commit what you have and call `release_issue` with a note. The branch is
@@ -995,7 +991,26 @@ def guide(m: "Mako", agent: str | None) -> str:
               "agent": agent, "agents": ", ".join(m.agents),
               "worktree": m.worktree(agent) if agent else ""}
     role = GUIDE_WORKER if agent in m.agents else GUIDE_ORCHESTRATOR
-    return (GUIDE_COMMON + role + GUIDE_CLI).format(**values)
+    text = (GUIDE_COMMON + role + GUIDE_CLI).format(**values)
+    # After format(), so braces in the user's file never reach it.
+    return text.replace("{worker.finish}", prompt(m, "worker.finish", values, indent="   "))
+
+
+def prompt(m: "Mako", name: str, values: dict, indent: str) -> str:
+    """The user-editable text in .mako/prompts/<name>.txt, read fresh each time.
+    Only the guide's own placeholders are substituted (plain replace, so other
+    braces pass through). Lines after the first get `indent`, to sit under the
+    list item the placeholder is in. A missing file says so instead of hiding it."""
+    path = m.dir / "prompts" / f"{name}.txt"
+    try:
+        text = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip("\n")
+    except FileNotFoundError:
+        return (f"**`.mako/prompts/{name}.txt` is missing, so these steps can't be shown. "
+                "Tell the user to run `mako init` to restore it.**")
+    for key in ("root", "project", "base", "prefix", "agent", "worktree"):
+        text = text.replace("{" + key + "}", str(values[key] or ""))
+    return "\n".join(line and indent + line if i else line
+                     for i, line in enumerate(text.split("\n")))
 
 
 MCP_TOOLS = [
@@ -1319,6 +1334,7 @@ class Init:
         self.install()
         self.worktrees(repo, base, agents)
         self.generate(project, agents)
+        self.prompts()
         self.obsidian(project)
         if not (self.root / "CLAUDE.md").exists():
             self.write(self.root / "CLAUDE.md", f"{CLAUDE_POINTER}\n# {project}\n")
@@ -1413,6 +1429,19 @@ class Init:
         os.chmod(self.dir / "bin" / "mako", 0o755)
         for agent in ["orchestrator", *agents]:
             self.write(self.dir / "agents" / f"{agent}.mcp.json", mcp_config(script, agent))
+
+    def prompts(self) -> None:
+        """Install the default .mako/prompts/*.txt. Only missing files are written:
+        these are the user's to edit, so upgrades never overwrite them."""
+        tpl = Path(__file__).resolve().parent / "templates" / "prompts"
+        if not tpl.is_dir():
+            self.log.append(f"warning: no prompt templates at {tpl}; skipped .mako/prompts/")
+            return
+        for src in sorted(tpl.glob("*.txt")):
+            dst = self.dir / "prompts" / src.name
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                self.write(dst, src.read_bytes())
 
     def obsidian(self, project: str) -> None:
         tpl = Path(__file__).resolve().parent / "templates" / "obsidian"

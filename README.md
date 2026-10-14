@@ -81,6 +81,7 @@ touches your cards, config or repo history.
   mako.launch.bat                Windows Terminal: orchestrator + one pane per slot
   .obsidian/                     Kanban and Advanced Exclude plugins, pre-enabled
   .mako/                         Mako itself: code, config, locks, slot worktrees
+  .mako/prompts/worker.finish.txt  the workers' "To finish" steps; yours to edit (init never overwrites it)
 ```
 
 ### Next steps
