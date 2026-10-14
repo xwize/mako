@@ -109,7 +109,7 @@ def check_source(src: Path, base: str, force: bool) -> list[str]:
 
 def run_init(root: Path, script: Path) -> subprocess.CompletedProcess:
     """`<script> init` in the workspace: installs script + its templates, regenerates files."""
-    return subprocess.run([sys.executable, str(script), "init"], cwd=root,
+    return subprocess.run([sys.executable, str(script), "init"], cwd=root, check=False,
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
@@ -146,8 +146,8 @@ def upgrade(root: Path, src: Path | None, force: bool, dry_run: bool) -> None:
         try:
             py_compile.compile(str(src), cfile=str(Path(tmp) / "mako.pyc"), doraise=True)
         except py_compile.PyCompileError as e:
-            raise UpgradeError(f"source does not compile:\n{e.msg}")
-    r = subprocess.run([sys.executable, str(src), "--help"], capture_output=True, text=True)
+            raise UpgradeError(f"source does not compile:\n{e.msg}") from None
+    r = subprocess.run([sys.executable, str(src), "--help"], capture_output=True, text=True, check=False)
     if r.returncode != 0:
         raise UpgradeError(f"source fails `mako --help`:\n{r.stderr}")
 
@@ -240,7 +240,7 @@ def rollback(root: Path, dry_run: bool) -> None:
 
 
 def print_init(out: str) -> None:
-    lines = [l for l in out.splitlines() if l.strip()]
+    lines = [s for s in out.splitlines() if s.strip()]
     print("mako init:")
     for line in lines or ["(no files changed)"]:
         print(f"  {line}")

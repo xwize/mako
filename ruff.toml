@@ -1,0 +1,14 @@
+# Development only: `uvx ruff check src scripts` (or `ruff check src scripts`) before committing.
+# Mako itself stays single-file and standard-library only; nothing here is needed to run it.
+
+target-version = "py310"   # the real minimum: Path.write_text(newline=) is 3.10+
+line-length = 120          # the code is written to about 110; PEP 8's 79 would rewrap most of the file
+
+[lint]
+select = ["E", "W", "F", "B", "UP", "SIM", "PL"]
+ignore = [
+    "PLR0912",  # too many branches: main()'s argparse dispatch and the MCP tool switch are flat lists of cases
+    "PLR0915",  # too many statements: the same dispatchers, plus upgrade(), which is a linear script
+    "PLR0913",  # too many arguments: _edit/edit mirror `mako edit`'s options one to one
+    "PLR0917",  # too many positional arguments: same functions; callers pass keywords where it matters
+]

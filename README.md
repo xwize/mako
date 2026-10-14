@@ -46,9 +46,9 @@ pins to one.
 
 ### Prerequisites
 
-- **Python 3** as `python` on PATH. Mako is a single standard-library Python file, and everything it
-  generates runs `python`, so `py -3` alone isn't enough. A `python` that opens the Microsoft
-  Store is only a stub. Install from [python.org](https://www.python.org/downloads/) and tick
+- **Python 3.10 or newer** as `python` on PATH. Mako is a single standard-library Python file,
+  and everything it generates runs `python`, so `py -3` alone isn't enough. A `python` that opens
+  the Microsoft Store is only a stub. Install from [python.org](https://www.python.org/downloads/) and tick
   *Add python.exe to PATH*.
 - **git** ([Git for Windows](https://git-scm.com/download/win)).
 - Optional, needed by the launcher: **Windows Terminal** (`wt`) and **Claude Code** (`claude`). The
@@ -129,3 +129,16 @@ have been reviewed. Leave it empty (`""`, the default) to turn review off.
 
 The command can use `{base}`, `{branch}`, `{id}` and `{worktree}`. Its output goes to
 `.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it.
+
+## Development
+
+Mako's code is `src/mako.py` (single file, standard library only) and `scripts/upgrade.py`. Before
+committing, run the linter, which also checks PEP 8 style:
+
+```
+uvx ruff check src scripts
+```
+
+(`pip install ruff` and then `ruff check src scripts` works too.) Its settings, including the rules
+turned off and why, are in `ruff.toml` at the repo root. ruff is a development tool only; Mako
+doesn't need it to install or run.
