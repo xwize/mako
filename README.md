@@ -130,6 +130,29 @@ have been reviewed. Leave it empty (`""`, the default) to turn review off.
 The command can use `{base}`, `{branch}`, `{id}` and `{worktree}`. Its output goes to
 `.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it.
 
+## Keeping issue branches
+
+By default, closing an issue merges its branch into the base branch and deletes it. To keep the
+branches, set `keep_branches` in `.mako/config.json`:
+
+```json
+"keep_branches": true
+```
+
+Closing then keeps the local branch and names it in the merge commit, for example
+`Merge feature/MYPROJ-0005-login (MYPROJ-0005): Login`. Reopening and claiming such an issue
+resumes its old branch; the worker merges the base branch into it before closing again.
+
+`mako prune` deletes the kept branches of Done issues, whatever the setting. It uses
+`git branch -d`, so only fully merged branches go; a spike's unmerged branch is skipped. It never
+touches a Backlog or In Progress issue's branch, the base branch or a branch checked out in a
+worktree.
+
+- `mako prune --dry-run` lists what would be deleted.
+- `mako prune <ID..>` prunes only those issues.
+- `mako prune --discarded` also deletes the branches of discarded issues (`git branch -D`). Their
+  work was never merged, so `--dry-run` shows how many commits each would lose.
+
 ## Development
 
 Mako's code is `src/mako.py` (single file, standard library only) and `scripts/upgrade.py`. It

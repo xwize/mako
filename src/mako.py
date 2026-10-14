@@ -250,6 +250,8 @@ class Mako:
         self.agents = list(self.config.get("agents", []))
         # Empty means no review step: no request_review, no gate on close_issue.
         self.review_command = str(self.config.get("review_command") or "").strip()
+        # On: close keeps the merged branch and names it in the merge commit. Off: it's deleted.
+        self.keep_branches = self.config.get("keep_branches") is True
         self.kanban = root / "kanban"
         self.open_dir = self.kanban / "open"
         self.closed_dir = self.kanban / "closed"
@@ -674,7 +676,10 @@ class Mako:
             self._merge_into_base(card.id, branch)
         if lock:
             self._free_slot(card.id, lock, branch)
-        if branch and branch_exists(self.project, branch) and not (spike and pending):
+        # A branch that never had commits is always deleted: there is nothing to keep.
+        # With keep_branches, one that was merged (now or before a reopen) is kept for `mako prune`.
+        keep = pending if spike else self.keep_branches and (pending or card.meta.get("merged"))
+        if branch and branch_exists(self.project, branch) and not keep:
             git(self.project, "branch", "-d", branch)  # fully merged (or never had commits)
         if pending and not spike:
             card.meta["merged"] = now()
@@ -696,7 +701,9 @@ class Mako:
             raise MakoError(f"the main checkout {self.project} has uncommitted changes; "
                             "it must be clean to merge")
         try:
-            git(self.project, "merge", "--no-ff", "-m", f"Merge {cid}: {self.get(cid).title}", branch)
+            title = self.get(cid).title
+            message = f"Merge {branch} ({cid}): {title}" if self.keep_branches else f"Merge {cid}: {title}"
+            git(self.project, "merge", "--no-ff", "-m", message, branch)
         except MakoError as e:
             _git(self.project, "merge", "--abort")
             raise MakoError(f"merging {branch} into {self.base} failed, nothing was changed: {e}") from None
@@ -785,7 +792,7 @@ class Mako:
             head = (f"{cid} was in progress ({owner})." if was == "in-progress"
                     else f"{cid} still had a branch from an earlier claim.")
             self.note(f"warning: {head} Its branch {branch} was kept and nothing was merged. "
-                      f"Delete it with `git branch -D {branch}` if the work isn't needed.")
+                      f"Delete it with `mako prune --discarded {cid}` if the work isn't needed.")
         for c in self.dependents(cid):
             if c.status in ("backlog", "in-progress"):
                 self.note(f"warning: {c.id} depends on {cid} and is now blocked; "
@@ -865,6 +872,54 @@ class Mako:
             shutil.rmtree(lock_dir, ignore_errors=True)
         return card
 
+    def _prune(self, ids, dry_run: bool, discarded: bool) -> list[str]:
+        """Delete the local branches of Done cards (`git branch -d`, merged ones only) and,
+        with discarded, of discarded cards (`git branch -D`: they are unmerged by definition).
+        Never a Backlog or In Progress card's branch, the base branch or one checked out
+        in a worktree. With ids, only those issues, and each one is reported."""
+        wanted = [self.get(cid).id for cid in self.parse_ids(ids)]
+        porcelain = git(self.project, "worktree", "list", "--porcelain").splitlines()
+        checked_out = {line[len("branch refs/heads/"):] for line in porcelain
+                       if line.startswith("branch refs/heads/")}
+        lines = []
+        for card in self.cards():
+            if wanted and card.id not in wanted:
+                continue
+            branch = card.meta.get("branch", "")
+            label = f"{branch} ({card.id})"
+            if card.status not in ("done", "discarded"):
+                if wanted:
+                    lines.append(f"skipped {card.id}: {COLUMNS[card.status]} issues keep their branch")
+                continue
+            if not branch or not branch_exists(self.project, branch):
+                if wanted:
+                    lines.append(f"skipped {card.id}: it has no branch")
+                continue
+            if card.status == "discarded" and not discarded:
+                if wanted:
+                    lines.append(f"skipped {label}: discarded; add --discarded to delete it")
+                continue
+            if branch == self.base or branch in checked_out:
+                lines.append(f"skipped {label}: checked out in a worktree")
+                continue
+            unmerged = unmerged_commits(self.project, branch, self.base)
+            lost = f", losing {unmerged} unmerged commit{'s' * (unmerged != 1)}" if unmerged else ""
+            if card.status == "done" and unmerged:
+                spike = " (a spike's branch)" if card.meta.get("type") == "spike" else ""
+                lines.append(f"skipped {label}: not fully merged, {unmerged} commit"
+                             f"{'s' * (unmerged != 1)} not in {self.base}{spike}")
+                continue
+            if dry_run:
+                lines.append(f"would delete {label}{lost}")
+                continue
+            try:
+                git(self.project, "branch", "-D" if card.status == "discarded" else "-d", branch)
+            except MakoError as e:
+                lines.append(f"skipped {label}: {e}")
+                continue
+            lines.append(f"deleted {label}{lost}")
+        return lines
+
     def _next_backlog(self, kind: str | None) -> Card:
         pos = {cid: i for i, cid in enumerate(self.order)}
         backlog = [c for c in self.cards()
@@ -901,6 +956,9 @@ class Mako:
 
     def reopen(self, cid):
         return self.transact(lambda: self._reopen(cid))
+
+    def prune(self, ids=None, dry_run=False, discarded=False):
+        return self.transact(lambda: self._prune(ids, dry_run, discarded))
 
     def edit(self, cid, title=None, kind=None, description=None, append=None,
              depends=None, add_deps=None, remove_deps=None):
@@ -982,7 +1040,9 @@ def fmt_close(m: Mako, card: Card) -> str:
         kept = f"; branch kept: {branch}" if branch and branch_exists(m.project, branch) else ""
         return f"Closed spike {card.id} without merging{kept}."
     if card.meta.get("merged"):
-        return f"Merged {card.meta.get('branch')} into the base branch and closed {card.id}."
+        branch = card.meta.get("branch")
+        kept = "; branch kept" if branch and branch_exists(m.project, branch) else ""
+        return f"Merged {branch} into the base branch and closed {card.id}{kept}."
     return f"Closed {card.id} (nothing to merge)."
 
 
@@ -1396,7 +1456,8 @@ class Init:
                 raise MakoError(f"this workspace's project is '{config['project']}', not '{project}'")
             if any(v is not None for v in (prefix, agents, base)):
                 self.log.append("kept existing .mako/config.json (edit it to change prefix, agents or base)")
-            config.setdefault("review_command", "")  # listed so it can be found; never changed
+            config.setdefault("review_command", "")  # listed so they can be found; never changed
+            config.setdefault("keep_branches", False)
             return config
         if not project:
             raise MakoError("usage: mako init <project_name>")
@@ -1412,7 +1473,7 @@ class Init:
         if len(set(agents)) != len(agents):
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
-                "review_command": ""}
+                "review_command": "", "keep_branches": False}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
         """Write only if the content changed, and log it."""
@@ -1640,6 +1701,11 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("reopen", help="move a closed or discarded issue back to the backlog")
     s.add_argument("id")
+    s = sub.add_parser("prune", help="delete the local branches of Done issues (merged ones only)")
+    s.add_argument("ids", nargs="*", help="only these issues")
+    s.add_argument("--dry-run", action="store_true", help="list what would be deleted")
+    s.add_argument("--discarded", action="store_true",
+                   help="also delete discarded issues' branches (unmerged work is lost)")
     s = sub.add_parser("launch", help="open Windows Terminal with the agents")
     s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
     s = sub.add_parser("resume", help="like launch, but each agent continues its last conversation")
@@ -1711,6 +1777,8 @@ def main(argv: list[str] | None = None) -> int:
             out = f"Discarded {card.id}: moved to kanban/discarded, nothing merged."
         elif a.cmd == "reopen":
             out = f"Reopened {m.reopen(a.id).id}"
+        elif a.cmd == "prune":
+            out = "\n".join(m.prune(a.ids, a.dry_run, a.discarded)) or "Nothing to prune."
         elif a.cmd in ("launch", "resume"):
             out = launch(m, a.who, resume=a.cmd == "resume")
         for n in m.notes:

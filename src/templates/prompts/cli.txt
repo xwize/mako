@@ -6,5 +6,6 @@
 `mako new .. --depends <ID,..>`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
 `mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`,
 `mako discard <ID> [--note ".."] [--force]`, `mako reopen <ID>` (closed or discarded),
+`mako prune [ID..] [--dry-run] [--discarded]` (delete Done issues' merged branches),
 {review_cli}`mako launch [slot]`, `mako resume [slot]` (reopen the panes, each continuing its last
 conversation), `mako guide`, `mako init` (re-run to upgrade the generated files).
