@@ -1,0 +1,14 @@
+# Mako
+
+This workspace uses Mako: a kanban board plus fixed agent slots, each with its own git worktree.
+
+- Workspace root: {root}
+- Project repo: {project}/ (main checkout, branch `{base}`).
+- Issues: cards like `{prefix}-0001` in kanban/open and kanban/closed, shown on kanban/board.md (Obsidian).
+- Lifecycle: Backlog -> In Progress (claim) -> Done (close). Closing merges the issue branch into
+  `{base}`, so nothing reaches Done unmerged.
+- Discarding (`discard_issue`, `mako discard`) drops an issue that won't be done: it leaves the
+  board for kanban/discarded, nothing is merged and any branch is kept. `mako reopen` undoes it.
+- Mako owns kanban/. Never edit those files directly; use the mako tools. To change a card's
+  title, type or description, use `edit_issue` (`mako edit`); it only works while the card is in
+  the Backlog.
