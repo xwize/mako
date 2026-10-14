@@ -708,7 +708,7 @@ GUIDE_CLI = """
 `mako` is on PATH in panes started by mako.launch.bat:
 `mako list [--all]`, `mako status`, `mako show <ID>`, `mako new <feature|bug|spike> "title"`,
 `mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`, `mako reopen <ID>`,
-`mako guide`.
+`mako guide`, `mako init` (re-run to upgrade the generated files).
 """
 
 
@@ -854,11 +854,243 @@ def launch(m: Mako, who: str | None) -> str:
     return f"Opened a tab for {who}"
 
 
+# --- init ------------------------------------------------------------------------
+
+CLAUDE_POINTER = ("This workspace uses Mako for issues and multi-agent work; the `mako` MCP server's "
+                  "instructions (and its `guide` tool) explain your role and the rules.\n")
+
+ROOT_CMD = '@python "%~dp0.mako\\mako.py" %*\n'
+BIN_CMD = '@python "%~dp0..\\mako.py" %*\n'
+BIN_SH = """\
+#!/bin/sh
+# POSIX shim so `mako` works from Git Bash (Claude Code's shell and `!` commands).
+exec python "$(dirname "$0")/../mako.py" "$@"
+"""
+
+AGENT_CMD = """\
+@echo off
+rem Starts Claude for one mako slot:  agent.cmd <slot>
+rem "orchestrator" runs at the workspace root; worker slots run in their worktree.
+setlocal
+set "SLOT=%~1"
+if "%SLOT%"=="" (
+  echo usage: agent.cmd ^<slot^|orchestrator^>
+  exit /b 1
+)
+for %%I in ("%~dp0..") do set "ROOT=%%~fI"
+set "MAKO_AGENT=%SLOT%"
+set "PATH=%ROOT%\\.mako\\bin;%PATH%"
+title %SLOT%
+
+if /i "%SLOT%"=="orchestrator" (
+  cd /d "%ROOT%"
+  claude --add-dir "%ROOT%\\{project}" --mcp-config "%ROOT%\\.mako\\agents\\orchestrator.mcp.json" --allowedTools mcp__mako
+) else (
+  cd /d "%ROOT%\\.mako\\worktrees\\%SLOT%"
+  claude --add-dir "%ROOT%" --mcp-config "%ROOT%\\.mako\\agents\\%SLOT%.mcp.json" --allowedTools mcp__mako
+)
+"""
+
+LAUNCH_BAT = """\
+@echo off
+rem Opens Windows Terminal with the orchestrator on the left (pane 0)
+rem and the worker slots stacked on the right:
+{panes}
+rem
+rem Each split names the pane it splits with focus-pane, so the layout never
+rem depends on which pane happens to have focus when wt processes the command.
+
+for %%I in ("%~dp0.") do set "ROOT=%%~fI"
+set "WT=%ROOT%\\.mako\\worktrees"
+set "AGENT=%ROOT%\\.mako\\agent.cmd"
+
+wt -w new ^
+  {commands}
+"""
+
+
+def launch_bat(agents: list[str]) -> str:
+    # Pane ids follow creation order: orchestrator 0, then slot k is pane k.
+    # Slot 1 splits the right half off pane 0; each later slot splits the pane
+    # above it, taking the share that keeps the right column evenly stacked.
+    pane = '--title {0} --suppressApplicationTitle -d "{1}" cmd /k "%AGENT%" {0}'
+    cmds = ["new-tab " + pane.format("orchestrator", "%ROOT%")]
+    n = len(agents)
+    for k, slot in enumerate(agents, 1):
+        cmds.append(f"focus-pane -t {k - 1}")
+        split = "-V --size 0.5" if k == 1 else f"-H --size {(n - k + 1) / (n - k + 2):.3g}"
+        cmds.append(f"split-pane {split} " + pane.format(slot, f"%WT%\\{slot}"))
+    cmds.append("focus-pane -t 0")
+    panes = "\n".join(f"rem   pane {k}: {slot}" for k, slot in enumerate(agents, 1)) or "rem   (no slots)"
+    return LAUNCH_BAT.format(panes=panes, commands=" ; ^\n  ".join(cmds))
+
+
+def mcp_config(script: Path, agent: str) -> str:
+    server = {"command": "python", "args": [script.as_posix(), "mcp"], "env": {"MAKO_AGENT": agent}}
+    return json.dumps({"mcpServers": {"mako": server}}, indent=2) + "\n"
+
+
+def same_path(a, b) -> bool:
+    return Path(a).resolve() == Path(b).resolve()
+
+
+class Init:
+    """`mako init`: turn a folder into a Mako workspace. Safe to re-run: it
+    upgrades .mako/mako.py and rewrites the generated files, but never touches
+    cards, config.json, an existing CLAUDE.md or the project repo's history."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.dir = root / ".mako"
+        self.log: list[str] = []
+
+    def run(self, project, prefix, agents, base) -> str:
+        config = self.config(project, prefix, agents, base)
+        project, base, agents = config["project"], config["base_branch"], config["agents"]
+        repo = self.root / project
+        self.repo(repo, base)
+        # Written only once the repo checks pass, so a failed first init can be
+        # re-run with other options.
+        self.dir.mkdir(exist_ok=True)
+        self.write(self.dir / "config.json", json.dumps(config, indent=2) + "\n")
+        for d in ("kanban/open", "kanban/closed", ".mako/bin", ".mako/agents",
+                  ".mako/locks", ".mako/worktrees"):
+            (self.root / d).mkdir(parents=True, exist_ok=True)
+        self.install()
+        self.worktrees(repo, base, agents)
+        self.generate(project, agents)
+        self.obsidian(project)
+        if not (self.root / "CLAUDE.md").exists():
+            self.write(self.root / "CLAUDE.md", f"{CLAUDE_POINTER}\n# {project}\n")
+        Mako(self.root).sync()  # renders kanban/board.md from the cards
+        self.log.append(f"\nMako workspace ready: {self.root}\n"
+                        f"  Open this folder as an Obsidian vault to see kanban/board.md.\n"
+                        f"  Run mako.launch.bat to start the orchestrator and {', '.join(agents) or 'no slots'}.")
+        return "\n".join(self.log)
+
+    def config(self, project, prefix, agents, base) -> dict:
+        path = self.dir / "config.json"
+        if path.is_file():
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if project and project != config["project"]:
+                raise MakoError(f"this workspace's project is '{config['project']}', not '{project}'")
+            if any(v is not None for v in (prefix, agents, base)):
+                self.log.append("kept existing .mako/config.json (edit it to change prefix, agents or base)")
+            return config
+        if not project:
+            raise MakoError("usage: mako init <project_name>")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project):
+            raise MakoError(f"bad project name '{project}' (letters, digits, '.', '_', '-')")
+        prefix = (prefix or re.sub(r"[^A-Za-z]", "", project)).upper()
+        if not re.fullmatch(r"[A-Z]+", prefix):
+            raise MakoError("the prefix must be letters only; pass --prefix")
+        agents = [a.strip() for a in (agents or "agent-a,agent-b").split(",") if a.strip()]
+        for a in agents:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", a) or a.lower() == "orchestrator":
+                raise MakoError(f"bad agent slot name '{a}'")
+        if len(set(agents)) != len(agents):
+            raise MakoError("agent slot names must be unique")
+        return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents}
+
+    def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
+        """Write only if the content changed, and log it."""
+        if isinstance(data, str):
+            data = (data.replace("\n", "\r\n") if crlf else data).encode("utf-8")
+        if path.is_file() and path.read_bytes() == data:
+            return
+        self.log.append(f"{'updated' if path.exists() else 'created'} {path.relative_to(self.root).as_posix()}")
+        path.write_bytes(data)
+
+    def install(self) -> None:
+        """Copy the running mako.py (and its templates) into .mako/."""
+        src = Path(__file__).resolve()
+        dst = self.dir / "mako.py"
+        if not same_path(src, dst):
+            self.write(dst, src.read_bytes())
+        tpl, dst_tpl = src.parent / "templates", self.dir / "templates"
+        if tpl.is_dir() and not same_path(tpl, dst_tpl):
+            shutil.rmtree(dst_tpl, ignore_errors=True)
+            shutil.copytree(tpl, dst_tpl)
+
+    def repo(self, repo: Path, base: str) -> None:
+        repo.mkdir(exist_ok=True)
+        top = _git(repo, "rev-parse", "--show-toplevel")
+        # A folder that merely sits inside some other repo is not adopted.
+        if top.returncode != 0 or not same_path(top.stdout.strip(), repo):
+            git(repo, "init", "-q")
+            self.log.append(f"initialised git repo {repo.name}/")
+        if not git_ok(repo, "rev-parse", "--verify", "-q", "HEAD"):
+            # Worktrees need a commit. Unborn repo: put HEAD on the base branch first.
+            git(repo, "symbolic-ref", "HEAD", f"refs/heads/{base}")
+            ident = [] if _git(repo, "config", "user.email").stdout.strip() else \
+                ["-c", "user.name=Mako", "-c", "user.email=mako@localhost"]
+            git(repo, *ident, "commit", "-q", "--allow-empty", "-m", "Initial commit")
+            self.log.append(f"made an initial commit on {base} in {repo.name}/")
+        if not branch_exists(repo, base):
+            raise MakoError(f"{repo.name}/ has no branch '{base}'; create it or pass --base <branch>")
+        if current_branch(repo) != base:
+            self.log.append(f"warning: {repo.name}/ is not on {base}; closing issues needs it there")
+
+    def worktrees(self, repo: Path, base: str, agents: list[str]) -> None:
+        git(repo, "worktree", "prune")
+        for slot in agents:
+            wt = self.dir / "worktrees" / slot
+            if (wt / ".git").exists():
+                continue
+            if wt.exists() and any(wt.iterdir()):
+                raise MakoError(f"{wt} exists but is not a git worktree; move it aside and re-run init")
+            git(repo, "worktree", "add", "-q", "--detach", str(wt), base)
+            self.log.append(f"created worktree .mako/worktrees/{slot} (detached at {base})")
+
+    def generate(self, project: str, agents: list[str]) -> None:
+        script = self.dir / "mako.py"
+        self.write(self.root / "mako.cmd", ROOT_CMD, crlf=True)
+        self.write(self.root / "mako.launch.bat", launch_bat(agents), crlf=True)
+        self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project), crlf=True)
+        self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
+        self.write(self.dir / "bin" / "mako", BIN_SH)
+        os.chmod(self.dir / "bin" / "mako", 0o755)
+        for agent in ["orchestrator", *agents]:
+            self.write(self.dir / "agents" / f"{agent}.mcp.json", mcp_config(script, agent))
+
+    def obsidian(self, project: str) -> None:
+        tpl = Path(__file__).resolve().parent / "templates" / "obsidian"
+        vault = self.root / ".obsidian"
+        if not tpl.is_dir():
+            self.log.append(f"warning: no Obsidian templates at {tpl}; skipped .obsidian/")
+        else:
+            for src in sorted(p for p in tpl.rglob("*") if p.is_file()):
+                rel = src.relative_to(tpl)
+                dst = vault / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if rel.name == "community-plugins.json" and dst.is_file():
+                    # Keep the user's own plugins enabled alongside ours.
+                    have = json.loads(dst.read_text(encoding="utf-8"))
+                    want = have + [p for p in json.loads(src.read_text(encoding="utf-8")) if p not in have]
+                    if want != have:
+                        self.write(dst, json.dumps(want, indent=2) + "\n")
+                elif rel.parts[0] == "plugins" and rel.name != "data.json":
+                    self.write(dst, src.read_bytes())  # plugin code: upgrade
+                elif not dst.exists():
+                    self.write(dst, src.read_bytes())  # settings: only if missing
+        ignore = self.root / ".obsidianignore"
+        line = f"{project}/*/"
+        old = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
+        if line not in old.splitlines():
+            self.write(ignore, (old.rstrip("\n") + "\n" if old.strip() else "") + line + "\n")
+
+
 # --- CLI -----------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="mako", description="Multi-agent kanban for Claude Code.")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("init", help="make the current folder a Mako workspace (safe to re-run)")
+    s.add_argument("project", nargs="?", help="project folder / git repo name (optional on re-run)")
+    s.add_argument("--prefix", help="issue id prefix (default: project name upper-cased)")
+    s.add_argument("--agents", help="comma-separated worker slots (default: agent-a,agent-b)")
+    s.add_argument("--base", help="base branch (default: main)")
 
     s = sub.add_parser("new", help="create an issue")
     s.add_argument("type", choices=TYPES)
@@ -903,6 +1135,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sys.stdout.reconfigure(encoding="utf-8")
     try:
+        if a.cmd == "init":
+            # The current folder, never a workspace found further up.
+            print(Init(Path.cwd().resolve()).run(a.project, a.prefix, a.agents, a.base))
+            return 0
         m = Mako(find_root())
         if a.cmd == "new":
             card = m.new(a.type, " ".join(a.title), a.body)
