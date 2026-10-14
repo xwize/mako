@@ -1114,8 +1114,8 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
     elif name == "request_review":
         info = m.review(args["id"], agent)
         result = (f"Review opened for {info['id']} ({info['sha'][:7]}). End your turn and wait. "
-                  'The user will reply "approve" or send comments; on comments, fix them, commit and '
-                  f"call request_review again. Log: {info['log']}")
+                  'The user will reply "approve" or send comments; on comments, fix them, re-run the '
+                  f"tests, commit and call request_review again. Log: {info['log']}")
     elif name == "release_issue":
         card = m.release(args["id"], agent, args.get("note", ""))
         result = f"Released {card.id} back to the Backlog."
