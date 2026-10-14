@@ -50,7 +50,7 @@ class MakoError(Exception):
 
 
 def now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M")
+    return os.environ.get("MAKO_NOW") or datetime.now().strftime("%Y-%m-%d %H:%M")  # MAKO_NOW: tests
 
 
 def slugify(text: str, limit: int = 40) -> str:

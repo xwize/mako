@@ -133,17 +133,39 @@ The command can use `{base}`, `{branch}`, `{id}` and `{worktree}`. Its output go
 ## Development
 
 Mako's code is `src/mako.py` (single file, standard library only) and `scripts/upgrade.py`. It
-supports Python 3.8 and newer, so don't use newer syntax or library features. Before committing,
-run the linter from the repo root. It also checks PEP 8 style:
+supports Python 3.8 and newer, so don't use newer syntax or library features. The tools below are
+for developing Mako only; it doesn't need them to install or run.
+
+### Running the tests
+
+From the repo root, before committing:
 
 ```
-uvx ruff check --config dev/ruff.toml src scripts
+python scripts/test.py
 ```
 
-(`pip install ruff` and then `ruff check --config dev/ruff.toml src scripts` works too.) Files
-that are only for developing Mako live in `dev/`, such as `dev/ruff.toml` with its rules and why
-some are turned off. Mako doesn't need any of them to install or run.
+(`scripts\test.cmd` from cmd or PowerShell.) It runs ruff, then the regression tests in `tests/`
+with pytest, and exits non-zero if anything fails. Extra arguments go to pytest, for example
+`python scripts/test.py -k claim`. pytest comes from `pip install pytest`, or from `uvx pytest`
+if [uv](https://docs.astral.sh/uv/) is installed. ruff is used if installed, or from uv's cache,
+and skipped with a note otherwise.
+
+The tests drive the real CLI and MCP server against a fresh workspace per test, in pytest's temp
+folder, with the clock (`MAKO_NOW`) and git config fixed, so they never touch a real board and a
+run gives the same result every time. `tests/helpers.py` has the helpers for acting as the user
+(board drags, typed cards, hand edits) and as an agent (commits, MCP calls).
+
+### Lint
+
+`scripts/test.py` runs it, or on its own:
+
+```
+uvx ruff check --config dev/ruff.toml src scripts tests
+```
+
+It checks PEP 8 style and common bugs. Files only for developing Mako live in `dev/`, such as
+`dev/ruff.toml` with its rules and why some are turned off.
 
 ruff doesn't catch library features newer than 3.8 (it missed `Path.write_text(newline=)`, which
-needs 3.10), so also try changes under 3.8 in a `testing/` deployment, for example with
+needs 3.10), so also try changes under 3.8, for example in a `testing/` deployment with
 `uv run --no-project --python 3.8 python ../../src/mako.py ...`.
