@@ -19,7 +19,8 @@ made in Obsidian are picked up by `sync`, which every command runs first.
 Lifecycle: Backlog -> In Progress (claim) -> Done (close). Closing merges the
 issue branch into the base branch, so nothing reaches Done unmerged. The worker
 first merges the base branch into its own branch and resolves any conflicts in
-its worktree; close refuses a branch that is behind the base branch.
+its worktree; close refuses a branch that is behind the base branch. Spikes are
+the exception: they close without merging and their branch is kept.
 """
 from __future__ import annotations
 
@@ -527,7 +528,8 @@ class Mako:
         blocked = ""
         if card.status == "backlog" and (b := self.blockers(card)):
             blocked = f" #blocked (waiting on {', '.join(x.split(' ')[0] for x in b)})"
-        return f"- [{box}] [[{card.id}]] {card.title} #{card.meta.get('type', 'feature')}{blocked}{who}"
+        unmerged = " #not-merged" if card.status == "done" and card.meta.get("type") == "spike" else ""
+        return f"- [{box}] [[{card.id}]] {card.title} #{card.meta.get('type', 'feature')}{unmerged}{blocked}{who}"
 
     def render_board(self) -> None:
         pos = {cid: i for i, cid in enumerate(self.order)}
@@ -641,9 +643,12 @@ class Mako:
         base branch first; the branch must already contain the base branch, so
         conflicts are resolved by the worker in its own worktree, never here.
         With gate (the agents' close_issue) and a review_command configured, the
-        branch's HEAD must be the commit the last request_review covered."""
+        branch's HEAD must be the commit the last request_review covered.
+        Spikes never merge: their result is the closing note, and a branch with
+        commits is kept as it is (no review gate, no behind-base check)."""
         card = self.get(cid)
         branch = card.meta.get("branch", "")
+        spike = card.meta.get("type") == "spike"
         if card.status == "done":
             raise MakoError(f"{card.id} is already closed")
         if card.status == "discarded":
@@ -656,18 +661,21 @@ class Mako:
                 raise MakoError(f"{lock.get('agent')}'s worktree has uncommitted changes on {branch}; "
                                 "commit them first")
         pending = unmerged_commits(self.project, branch, self.base)
-        if gate and self.review_command and lock and pending and not force:
+        if gate and self.review_command and lock and pending and not force and not spike:
             head = git(self.project, "rev-parse", branch)
             if lock.get("reviewed") != head:
                 raise MakoError(f"call `request_review` first (no review for {head[:7]})")
-        if pending:
+        if pending and not spike:
             self._merge_into_base(card.id, branch)
         if lock:
             self._free_slot(card.id, lock, branch)
-        if branch and branch_exists(self.project, branch):
+        if branch and branch_exists(self.project, branch) and not (spike and pending):
             git(self.project, "branch", "-d", branch)  # fully merged (or never had commits)
-        if pending:
+        if pending and not spike:
             card.meta["merged"] = now()
+        if spike:
+            kept = f"; branch kept: {branch}" if pending else ""
+            note = f"Spike closed without merging{kept}.\n\n{note.strip()}"
         card.meta.update(status="done", closed=now())
         self._append(card, "Closing note", agent, note)
         self.save(card)
@@ -932,6 +940,8 @@ def fmt_issue_list(m: Mako, status: str | None = None, include_done: bool = Fals
                 extra = f"  [{c.meta.get('claimed_by')}] {c.meta.get('branch')}"
             elif st == "done" and c.meta.get("merged"):
                 extra = "  [merged]"
+            elif st == "done" and c.meta.get("type") == "spike":
+                extra = "  [not merged]"  # spikes never merge
             if dep := fmt_deps(m, c):
                 extra += f"  [{dep}]"
             lines.append(f"  {c.id}  {c.meta.get('type', ''):<7}  {c.title}{extra}")
@@ -961,7 +971,11 @@ def fmt_claim(info: dict) -> str:
             f"  card:     {info['card']}")
 
 
-def fmt_close(card: Card) -> str:
+def fmt_close(m: Mako, card: Card) -> str:
+    if card.meta.get("type") == "spike":
+        branch = card.meta.get("branch")
+        kept = f"; branch kept: {branch}" if branch and branch_exists(m.project, branch) else ""
+        return f"Closed spike {card.id} without merging{kept}."
     if card.meta.get("merged"):
         return f"Merged {card.meta.get('branch')} into the base branch and closed {card.id}."
     return f"Closed {card.id} (nothing to merge)."
@@ -1110,7 +1124,7 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
     elif name == "claim_next":
         result = fmt_claim(m.claim_next(agent, args.get("type")))
     elif name == "close_issue":
-        result = fmt_close(m.close(args["id"], agent, args.get("note", ""), gate=True))
+        result = fmt_close(m, m.close(args["id"], agent, args.get("note", ""), gate=True))
     elif name == "request_review":
         info = m.review(args["id"], agent)
         result = (f"Review opened for {info['id']} ({info['sha'][:7]}). End your turn and wait. "
@@ -1673,7 +1687,7 @@ def main(argv: list[str] | None = None) -> int:
             info = m.claim_next(a.agent, a.type) if a.id == "next" else m.claim(a.id, a.agent)
             out = fmt_claim(info)
         elif a.cmd == "close":
-            out = fmt_close(m.close(a.id, a.agent, a.note, a.force))
+            out = fmt_close(m, m.close(a.id, a.agent, a.note, a.force))
         elif a.cmd == "release":
             card = m.release(a.id, a.agent, a.note, a.force)
             out = f"Released {card.id}"
