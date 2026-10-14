@@ -38,8 +38,9 @@ from pathlib import Path
 VERSION = "0.1.0"
 TYPES = ("feature", "bug", "spike")
 COLUMNS = {"backlog": "Backlog", "in-progress": "In Progress", "done": "Done"}
-FIELDS = ("id", "type", "title", "status", "created", "branch",
+FIELDS = ("id", "type", "title", "depends_on", "status", "created", "branch",
           "claimed_by", "claimed", "merged", "closed")
+LIST_FIELDS = ("depends_on",)
 
 
 class MakoError(Exception):
@@ -133,6 +134,8 @@ class Card:
 
 
 def _yaml_value(value) -> str:
+    if isinstance(value, list):
+        return f"[{', '.join(value)}]" if value else ""
     v = "" if value is None else str(value)
     if v and (re.search(r"[:#\[\]{}\"'\\,&*!|>%@`]", v) or v != v.strip()):
         return json.dumps(v, ensure_ascii=False)
@@ -144,18 +147,30 @@ def read_card(path: Path) -> Card:
     m = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
     if not m:
         return Card(path, {"id": path.stem}, text)
-    meta = {}
+    meta, key = {}, None
     for line in m.group(1).splitlines():
+        # Block lists, as Obsidian's Properties editor writes them: "key:" then "  - item".
+        if key in LIST_FIELDS and (item := re.match(r"^\s*-\s*(.*?)\s*$", line)):
+            if not isinstance(meta.get(key), list):
+                meta[key] = []
+            if item.group(1):
+                meta[key].append(item.group(1).strip("\"'"))
+            continue
         key, sep, value = line.partition(":")
+        key = key.strip()
         if not sep:
+            key = None
             continue
         value = value.strip()
+        if key in LIST_FIELDS and value.startswith("[") and value.endswith("]"):
+            meta[key] = [v.strip().strip("\"'") for v in value[1:-1].split(",") if v.strip()]
+            continue
         if value.startswith('"'):
             try:
                 value = json.loads(value)
             except ValueError:
                 pass
-        meta[key.strip()] = value
+        meta[key] = value
     return Card(path, meta, m.group(2))
 
 
@@ -173,6 +188,20 @@ CARD_BODY = """
 ## Notes
 
 """
+
+
+def cycle_from(graph: dict, start: str) -> list[str] | None:
+    """A path start -> ... -> start through graph (id -> dependency ids), if there is one."""
+    seen, stack = set(), [(start, [start])]
+    while stack:
+        node, path = stack.pop()
+        for d in graph.get(node, []):
+            if d == start:
+                return path + [d]
+            if d not in seen:
+                seen.add(d)
+                stack.append((d, path + [d]))
+    return None
 
 
 # --- workspace ---------------------------------------------------------------
@@ -263,6 +292,73 @@ class Mako:
 
     def note(self, msg: str) -> None:
         self.notes.append(msg)
+
+    # dependencies
+
+    def parse_ids(self, raw) -> list[str]:
+        """IDs from a list or a comma/space separated string, normalised and de-duplicated."""
+        items = raw if isinstance(raw, list) else re.split(r"[,\s]+", str(raw or ""))
+        out = []
+        for item in items:
+            if str(item).strip() and (cid := self.norm_id(item)) not in out:
+                out.append(cid)
+        return out
+
+    def deps(self, card: Card) -> list[str]:
+        """The card's dependencies as written, tolerating hand edits in Obsidian."""
+        raw = card.meta.get("depends_on") or []
+        items = raw if isinstance(raw, list) else re.split(r"[,\s]+", str(raw).strip("[]"))
+        out = []
+        for item in items:
+            if not str(item).strip():
+                continue
+            try:
+                cid = self.norm_id(item)
+            except MakoError:
+                cid = str(item).strip()
+            if cid not in out:
+                out.append(cid)
+        return out
+
+    def blockers(self, card: Card) -> list[str]:
+        """Dependencies that are not Done yet, as 'ID (state)'."""
+        out = []
+        for d in self.deps(card):
+            path = self.card_path(d)
+            if not path:
+                out.append(f"{d} (missing)")
+            elif (st := read_card(path).status) != "done":
+                out.append(f"{d} ({COLUMNS.get(st, st)})")
+        return out
+
+    def dependents(self, cid: str) -> list[Card]:
+        return [c for c in self.cards() if cid in self.deps(c)]
+
+    def check_deps(self, cid: str, deps: list[str]) -> None:
+        """Reject unknown ids, self-dependencies and cycles."""
+        for d in deps:
+            if d == cid:
+                raise MakoError(f"{cid} can't depend on itself")
+            if not self.card_path(d):
+                raise MakoError(f"{d} not found; {cid} can't depend on it")
+        graph = {c.id: self.deps(c) for c in self.cards()}
+        graph[cid] = deps
+        if path := cycle_from(graph, cid):
+            raise MakoError(f"that would make a dependency cycle: {' -> '.join(path)}")
+
+    def dep_problems(self) -> list[str]:
+        """Bad dependencies typed into cards by hand (missing ids, cycles)."""
+        cards = self.cards()
+        graph = {c.id: self.deps(c) for c in cards}
+        problems = []
+        for c in cards:
+            if c.status == "done":
+                continue
+            if missing := [d for d in graph[c.id] if d not in graph]:
+                problems.append(f"{c.id} depends on unknown {', '.join(missing)}")
+            if path := cycle_from(graph, c.id):
+                problems.append(f"{c.id} is in a dependency cycle: {' -> '.join(path)}")
+        return problems
 
     # locks
 
@@ -365,9 +461,13 @@ class Mako:
                 self.note(f"board: {cid} moved to {COLUMNS[column]}")
             except MakoError as e:
                 self.note(f"board: can't move {cid} to {COLUMNS[column]}: {e} (moved it back)")
+        for problem in self.dep_problems():
+            self.note(f"warning: {problem}")
 
     def _apply_drag(self, card: Card, column: str) -> None:
         if column == "in-progress":
+            if blocked := self.blockers(card):
+                raise MakoError(f"it is blocked by {', '.join(blocked)}")
             raise MakoError("cards only enter In Progress when an agent claims them")
         if column == "backlog":
             if card.status == "done":
@@ -390,7 +490,10 @@ class Mako:
     def card_line(self, card: Card) -> str:
         box = "x" if card.status == "done" else " "
         who = f" ({card.meta['claimed_by']})" if card.status == "in-progress" and card.meta.get("claimed_by") else ""
-        return f"- [{box}] [[{card.id}]] {card.title} #{card.meta.get('type', 'feature')}{who}"
+        blocked = ""
+        if card.status == "backlog" and (b := self.blockers(card)):
+            blocked = f" #blocked (waiting on {', '.join(x.split(' ')[0] for x in b)})"
+        return f"- [{box}] [[{card.id}]] {card.title} #{card.meta.get('type', 'feature')}{blocked}{who}"
 
     def render_board(self) -> None:
         pos = {cid: i for i, cid in enumerate(self.order)}
@@ -413,13 +516,16 @@ class Mako:
 
     # operations (call through transact)
 
-    def _new(self, kind: str, title: str, description: str) -> Card:
+    def _new(self, kind: str, title: str, description: str, depends=None) -> Card:
         if kind not in TYPES:
             raise MakoError(f"type must be one of {', '.join(TYPES)}")
         if not title.strip():
             raise MakoError("title is required")
         cid = self.next_id()
-        meta = {"id": cid, "type": kind, "title": title.strip(), "status": "backlog", "created": now()}
+        deps = self.parse_ids(depends)
+        self.check_deps(cid, deps)
+        meta = {"id": cid, "type": kind, "title": title.strip(), "depends_on": deps,
+                "status": "backlog", "created": now()}
         card = Card(self.open_dir / f"{cid}.md", meta,
                     CARD_BODY.format(title=title.strip(), description=description.strip() or "_TBD_"))
         self.save(card, closed=False)
@@ -440,6 +546,9 @@ class Mako:
             return self._claim_info(card, agent)
         if lock:
             raise MakoError(f"{cid} is already claimed by {lock.get('agent')}")
+        if blocked := self.blockers(card):
+            raise MakoError(f"{cid} is blocked by {', '.join(blocked)}; "
+                            "it can be claimed once they are Done")
         held = self.lock_of(agent)
         if held:
             raise MakoError(f"{agent} already holds {held['id']}; close or release it first")
@@ -559,11 +668,17 @@ class Mako:
         shutil.rmtree(self.locks / card.id, ignore_errors=True)
         card.meta.update(status="backlog", claimed_by="", claimed="", closed="")
         self.save(card, closed=False)
+        started = [f"{c.id} ({COLUMNS.get(c.status, c.status)})" for c in self.dependents(card.id)
+                   if c.status != "backlog"]
+        if started:
+            self.note(f"warning: issues that depend on {card.id} have already started: "
+                      f"{', '.join(started)}; nothing was undone")
         return card
 
     def _edit(self, cid: str, title: str | None, kind: str | None,
-              description: str | None, append: str | None) -> Card:
-        """Change a Backlog card's title, type or body. Holds the issue's claim
+              description: str | None, append: str | None,
+              depends=None, add_deps=None, remove_deps=None) -> Card:
+        """Change a Backlog card's title, type, body or dependencies. Holds the issue's claim
         lock while checking and writing, so a claim and an edit can't overlap."""
         card = self.get(cid)
         cid = card.id
@@ -602,6 +717,13 @@ class Mako:
                     card.body = f"\n# {card.title}\n\n## Description\n\n{text}\n"
             if append is not None and append.strip():
                 card.body = card.body.rstrip("\n") + f"\n\n{append.strip()}\n"
+            if depends is not None or add_deps or remove_deps:
+                deps = self.parse_ids(depends) if depends is not None else self.deps(card)
+                deps += [d for d in self.parse_ids(add_deps) if d not in deps]
+                gone = self.parse_ids(remove_deps)
+                deps = [d for d in deps if d not in gone]
+                self.check_deps(cid, deps)
+                card.meta["depends_on"] = deps
             self.save(card, closed=False)
         finally:
             shutil.rmtree(lock_dir, ignore_errors=True)
@@ -611,16 +733,17 @@ class Mako:
         pos = {cid: i for i, cid in enumerate(self.order)}
         backlog = [c for c in self.cards()
                    if c.status == "backlog" and not self.read_lock(c.id)
-                   and (kind is None or c.meta.get("type") == kind)]
+                   and (kind is None or c.meta.get("type") == kind) and not self.blockers(c)]
         if not backlog:
-            raise MakoError("no unclaimed issues in the backlog" + (f" of type {kind}" if kind else ""))
+            raise MakoError("no unclaimed, unblocked issues in the backlog"
+                            + (f" of type {kind}" if kind else ""))
         backlog.sort(key=lambda c: (pos.get(c.id, len(pos)), c.id))
         return backlog[0]
 
     # public API
 
-    def new(self, kind, title, description=""):
-        return self.transact(lambda: self._new(kind, title, description))
+    def new(self, kind, title, description="", depends=None):
+        return self.transact(lambda: self._new(kind, title, description, depends))
 
     def claim(self, cid, agent):
         return self.transact(lambda: self._claim(cid, agent))
@@ -637,8 +760,10 @@ class Mako:
     def reopen(self, cid):
         return self.transact(lambda: self._reopen(cid))
 
-    def edit(self, cid, title=None, kind=None, description=None, append=None):
-        return self.transact(lambda: self._edit(cid, title, kind, description, append))
+    def edit(self, cid, title=None, kind=None, description=None, append=None,
+             depends=None, add_deps=None, remove_deps=None):
+        return self.transact(lambda: self._edit(cid, title, kind, description, append,
+                                                depends, add_deps, remove_deps))
 
     def sync(self):
         return self.transact(lambda: None)
@@ -675,8 +800,26 @@ def fmt_issue_list(m: Mako, status: str | None = None, include_done: bool = Fals
                 extra = f"  [{c.meta.get('claimed_by')}] {c.meta.get('branch')}"
             elif st == "done" and c.meta.get("merged"):
                 extra = "  [merged]"
+            if dep := fmt_deps(m, c):
+                extra += f"  [{dep}]"
             lines.append(f"  {c.id}  {c.meta.get('type', ''):<7}  {c.title}{extra}")
     return "\n".join(lines)
+
+
+def fmt_deps(m: Mako, card: Card) -> str:
+    deps = m.deps(card)
+    if not deps:
+        return ""
+    blocked = m.blockers(card)
+    state = f"blocked by {', '.join(blocked)}" if blocked else "unblocked"
+    return f"depends on {', '.join(deps)}: {state}"
+
+
+def fmt_show(m: Mako, card: Card) -> str:
+    text = card.path.read_text(encoding="utf-8")
+    if dep := fmt_deps(m, card):
+        text = text.rstrip("\n") + f"\n\n({card.id} {dep})\n"
+    return text
 
 
 def fmt_claim(info: dict) -> str:
@@ -727,7 +870,8 @@ Your worktree is {worktree}. Change code only there, never in {project}/ (the ma
 another slot's worktree, and never run git commands in {project}/.
 
 1. Claim before working: `claim_issue` (or `claim_next`). This checks out the issue branch
-   `<type>/<ID>-<slug>` in your worktree. You hold one issue at a time.
+   `<type>/<ID>-<slug>` in your worktree. You hold one issue at a time. Issues whose
+   `depends_on` aren't all Done are blocked: claiming them fails and `claim_next` skips them.
 2. Read the card with `get_issue`.
 3. Commit on the issue branch, starting messages with the id: `{prefix}-0002: short summary`.
 4. To finish:
@@ -749,6 +893,8 @@ You run at the workspace root. Worker slots: {agents}.
 
 - Write issues with `create_issue` and refine Backlog ones with `edit_issue`; check progress
   with `list_issues`, `get_issue` and `mako status`.
+- When an issue needs another one finished first, give it `depends_on` (on `create_issue`, or
+  `add_depends` / `remove_depends` on `edit_issue`). It can't be claimed until those are Done.
 - Do not claim issues and do not merge: workers merge their own work when they close.
 - `release_issue` returns a stuck issue to the Backlog; `mako reopen <ID>` reopens a closed one.
 """
@@ -759,6 +905,7 @@ GUIDE_CLI = """
 `mako` is on PATH in panes started by mako.launch.bat:
 `mako list [--all]`, `mako status`, `mako show <ID>`, `mako new <feature|bug|spike> "title"`,
 `mako edit <ID> [--title ..] [--type ..] [--description ..|--description-file ..] [--append ..]`,
+`mako new .. --depends <ID,..>`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
 `mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`, `mako reopen <ID>`,
 `mako guide`, `mako init` (re-run to upgrade the generated files).
 """
@@ -786,7 +933,10 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "type": {"type": "string", "enum": list(TYPES)},
          "title": {"type": "string"},
-         "description": {"type": "string"}}, "required": ["type", "title"]}},
+         "description": {"type": "string"},
+         "depends_on": {"type": "array", "items": {"type": "string"},
+                        "description": "Issues that must be Done before this one can be claimed."}},
+         "required": ["type", "title"]}},
     {"name": "edit_issue",
      "description": "Change a Backlog issue's title, type or description, or append a note. "
                     "Refused once the issue is claimed (In Progress) or closed (Done).",
@@ -795,7 +945,11 @@ MCP_TOOLS = [
          "title": {"type": "string"},
          "type": {"type": "string", "enum": list(TYPES)},
          "description": {"type": "string", "description": "Replaces the card's Description section."},
-         "append": {"type": "string", "description": "Text added to the end of the card."}},
+         "append": {"type": "string", "description": "Text added to the end of the card."},
+         "depends_on": {"type": "array", "items": {"type": "string"},
+                        "description": "Replaces the dependency list ([] clears it)."},
+         "add_depends": {"type": "array", "items": {"type": "string"}},
+         "remove_depends": {"type": "array", "items": {"type": "string"}}},
          "required": ["id"]}},
     {"name": "claim_issue",
      "description": "Claim an issue for your slot: locks it, checks out its branch in your worktree, "
@@ -835,15 +989,16 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         return fmt_issue_list(m, args.get("status"), include_done=True)
     if name == "get_issue":
         card = m.get(args["id"])
-        return card.path.read_text(encoding="utf-8")
+        return fmt_show(m, card)
     if name == "create_issue":
-        card = m.new(args["type"], args["title"], args.get("description", ""))
+        card = m.new(args["type"], args["title"], args.get("description", ""), args.get("depends_on"))
         result = f"Created {card.id}: {card.title}"
     elif name == "edit_issue":
-        fields = {k: args.get(k) for k in ("title", "type", "description", "append")}
-        if all(v is None for v in fields.values()):
-            raise MakoError("nothing to change: pass title, type, description or append")
-        card = m.edit(args["id"], fields["title"], fields["type"], fields["description"], fields["append"])
+        keys = ("title", "type", "description", "append", "depends_on", "add_depends", "remove_depends")
+        fields = [args.get(k) for k in keys]
+        if all(v is None for v in fields):
+            raise MakoError(f"nothing to change: pass {', '.join(keys)}")
+        card = m.edit(args["id"], *fields)
         result = f"Edited {card.id}: {card.title}"
     elif name == "claim_issue":
         result = fmt_claim(m.claim(args["id"], agent))
@@ -1175,6 +1330,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("type", choices=TYPES)
     s.add_argument("title", nargs="+")
     s.add_argument("--body", default="", help="description text")
+    s.add_argument("--depends", help="comma-separated issues that must be Done first")
 
     s = sub.add_parser("list", help="list issues")
     s.add_argument("--all", action="store_true", help="include Done")
@@ -1190,6 +1346,13 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--description", help="replace the Description section")
     g.add_argument("--description-file", help="read the new description from a file")
     s.add_argument("--append", help="add text to the end of the card")
+    s.add_argument("--depends", help="replace the dependencies (comma-separated, '' clears)")
+
+    for name, text in (("depend", "make an issue wait for others to be Done"),
+                       ("undepend", "remove dependencies from an issue")):
+        s = sub.add_parser(name, help=text)
+        s.add_argument("id")
+        s.add_argument("deps", nargs="+")
 
     s = sub.add_parser("guide", help="print the Mako rules for an agent slot or the orchestrator")
     s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
@@ -1229,13 +1392,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         m = Mako(find_root())
         if a.cmd == "new":
-            card = m.new(a.type, " ".join(a.title), a.body)
+            card = m.new(a.type, " ".join(a.title), a.body, a.depends)
             out = f"Created {card.id}: {card.title}"
         elif a.cmd == "list":
             m.sync()
             out = fmt_issue_list(m, include_done=a.all)
         elif a.cmd == "show":
-            out = m.get(a.id).path.read_text(encoding="utf-8")
+            m.sync()
+            out = fmt_show(m, m.get(a.id))
+        elif a.cmd in ("depend", "undepend"):
+            add, remove = (a.deps, None) if a.cmd == "depend" else (None, a.deps)
+            card = m.edit(a.id, add_deps=add, remove_deps=remove)
+            dep = fmt_deps(m, card)
+            out = f"{card.id} {dep}" if dep else f"{card.id} has no dependencies"
         elif a.cmd == "edit":
             desc = a.description
             if a.description_file:
@@ -1243,10 +1412,10 @@ def main(argv: list[str] | None = None) -> int:
                     desc = Path(a.description_file).read_text(encoding="utf-8")
                 except OSError as e:
                     raise MakoError(f"can't read {a.description_file}: {e.strerror}") from None
-            if all(v is None for v in (a.title, a.type, desc, a.append)):
-                out = m.get(a.id).path.read_text(encoding="utf-8")
+            if all(v is None for v in (a.title, a.type, desc, a.append, a.depends)):
+                out = fmt_show(m, m.get(a.id))
             else:
-                card = m.edit(a.id, a.title, a.type, desc, a.append)
+                card = m.edit(a.id, a.title, a.type, desc, a.append, a.depends)
                 out = f"Edited {card.id}: {card.title}"
         elif a.cmd == "guide":
             out = guide(m, a.agent)
