@@ -57,13 +57,18 @@ def test_typed_card_becomes_a_real_card(ws):
     c = card(ws, "DEMO-0001")
     assert (c["type"], c["title"], c["_folder"]) == ("bug", "Typed on the board", "open")
     assert board(ws)["backlog"] == ["DEMO-0001"]
-    # No prefix means feature. A #type tag is dropped from the title, but (today) it
-    # doesn't set the type: only the "type:" prefix does.
+    # No prefix and no tag means feature. A #type tag sets the type and is dropped from
+    # the title; a prefix beats a tag, and the first of several tags wins.
     type_card(ws, "backlog", "Plain idea")
     type_card(ws, "backlog", "Look into it #spike")
+    type_card(ws, "backlog", "Crash on start #bug")
+    type_card(ws, "backlog", "spike: Prefix wins #bug")
+    type_card(ws, "backlog", "Tag #bug in the middle")
+    type_card(ws, "backlog", "Two tags #spike #bug")
     ok(ws, "list")
-    types = {card(ws, f"DEMO-000{i}")["title"]: card(ws, f"DEMO-000{i}")["type"] for i in (2, 3)}
-    assert types == {"Plain idea": "feature", "Look into it": "feature"}
+    types = {card(ws, f"DEMO-000{i}")["title"]: card(ws, f"DEMO-000{i}")["type"] for i in range(2, 8)}
+    assert types == {"Plain idea": "feature", "Look into it": "spike", "Crash on start": "bug",
+                     "Prefix wins": "spike", "Tag in the middle": "bug", "Two tags": "spike"}
 
 
 def test_board_order_is_kept(ws):
