@@ -1,0 +1,3 @@
+#!/bin/sh
+# POSIX shim so `mako` works from Git Bash (Claude Code's shell and `!` commands).
+exec python "$(dirname "$0")/../mako.py" "$@"
