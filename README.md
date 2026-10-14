@@ -121,6 +121,24 @@ or by typing it on the board with a `#human` tag. Human cards are a plain kanban
 column, with no locks, branches or merges, and agents can't claim or close them. An agent issue can
 depend on one; it unblocks when you move it to Done.
 
+## Spikes
+
+A spike is research or a prototype: it never merges, and closing keeps its branch. Its result is
+a summary file. When a worker claims a spike, Mako commits `.mako_spikes/spike_<ID>_<slug>.md` on
+the spike's branch, with frontmatter (`id`, `title`, `agent`, `created`, `branch`, `closed`)
+filled in. The worker writes the findings in its body and commits, and closing fills in `closed`.
+
+To get the summary off the branch, give the spike a `publish_to` folder:
+`mako new spike "Try caching" --publish-to docs/spikes`, or later with
+`mako edit <ID> --publish-to ..`, which also works while the spike is In Progress. Closing then
+copies the summary to `<publish_to>/spike_<ID>_<slug>.md`. A relative folder is taken from the
+workspace root. It's a plain copy, never committed, and a re-close after `mako reopen` overwrites
+it. A spike with `publish_to` but no summary on its branch can't be closed, except with
+`mako close <ID> --force`.
+
+`"spike_publish_to"` in `.mako/config.json` fills in `publish_to` on new spikes. Leave it empty
+(`""`, the default) for none.
+
 ## Code review
 
 Mako can stop each issue for your review before it merges. Set `review_command` in
