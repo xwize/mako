@@ -46,10 +46,10 @@ pins to one.
 
 ### Prerequisites
 
-- **Python 3.10 or newer** as `python` on PATH. Mako is a single standard-library Python file,
+- **Python 3.8 or newer** as `python` on PATH. Mako is a single standard-library Python file,
   and everything it generates runs `python`, so `py -3` alone isn't enough. A `python` that opens
-  the Microsoft Store is only a stub. Install from [python.org](https://www.python.org/downloads/) and tick
-  *Add python.exe to PATH*.
+  the Microsoft Store is only a stub. Install from [python.org](https://www.python.org/downloads/)
+  and tick *Add python.exe to PATH*.
 - **git** ([Git for Windows](https://git-scm.com/download/win)).
 - Optional, needed by the launcher: **Windows Terminal** (`wt`) and **Claude Code** (`claude`). The
   installer warns if they're missing but still finishes.
@@ -132,13 +132,18 @@ The command can use `{base}`, `{branch}`, `{id}` and `{worktree}`. Its output go
 
 ## Development
 
-Mako's code is `src/mako.py` (single file, standard library only) and `scripts/upgrade.py`. Before
-committing, run the linter, which also checks PEP 8 style:
+Mako's code is `src/mako.py` (single file, standard library only) and `scripts/upgrade.py`. It
+supports Python 3.8 and newer, so don't use newer syntax or library features. Before committing,
+run the linter from the repo root. It also checks PEP 8 style:
 
 ```
-uvx ruff check src scripts
+uvx ruff check --config dev/ruff.toml src scripts
 ```
 
-(`pip install ruff` and then `ruff check src scripts` works too.) Its settings, including the rules
-turned off and why, are in `ruff.toml` at the repo root. ruff is a development tool only; Mako
-doesn't need it to install or run.
+(`pip install ruff` and then `ruff check --config dev/ruff.toml src scripts` works too.) Files
+that are only for developing Mako live in `dev/`, such as `dev/ruff.toml` with its rules and why
+some are turned off. Mako doesn't need any of them to install or run.
+
+ruff doesn't catch library features newer than 3.8 (it missed `Path.write_text(newline=)`, which
+needs 3.10), so also try changes under 3.8 in a `testing/` deployment, for example with
+`uv run --no-project --python 3.8 python ../../src/mako.py ...`.

@@ -1,7 +1,8 @@
-# Development only: `uvx ruff check src scripts` (or `ruff check src scripts`) before committing.
+# Development only. From the repo root, before committing:
+#   uvx ruff check --config dev/ruff.toml src scripts
 # Mako itself stays single-file and standard-library only; nothing here is needed to run it.
 
-target-version = "py310"   # the real minimum: Path.write_text(newline=) is 3.10+
+target-version = "py38"    # the minimum Mako supports (the walrus operator needs 3.8)
 line-length = 120          # the code is written to about 110; PEP 8's 79 would rewrap most of the file
 
 [lint]

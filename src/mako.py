@@ -62,7 +62,8 @@ def write_atomic(path: Path, text: str) -> None:
     # Dot-prefixed temp file so Obsidian never indexes it. Retry the replace
     # because Obsidian can briefly hold the target open on Windows.
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8", newline="\n")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:  # write_text(newline=) is 3.10+
+        f.write(text)
     for _ in range(20):
         try:
             os.replace(tmp, path)
