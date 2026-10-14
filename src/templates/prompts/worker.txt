@@ -16,6 +16,8 @@ another slot's worktree, and never run git commands in {project}/.
    4. Call `close_issue` with a note on what changed and how you tested it.
    It merges your branch into `{base}`, moves the card to Done and frees your slot. If it says your
    branch is behind `{base}`, another worker merged first: repeat steps 2-4.
+   For a spike, finishing is: commit everything, then call `close_issue` with your findings as the
+   note. A spike never merges, so there is no `git merge {base}`; its branch is kept.
 5. If you cannot finish, commit what you have and call `release_issue` with a note. The branch is
    kept and the next claim resumes it.
 6. If the user decides an issue won't be done, call `discard_issue` with a note. You can discard
