@@ -1,4 +1,4 @@
-"""Snapshot tests: the guides, a rendered board and the generated launch files.
+"""Snapshot tests: a rendered board, `mako list` and the generated launch files.
 
 After a deliberate change, rewrite them with `python scripts/test.py --update-snapshots`
 and review the diff of tests/snapshots/ like any other change.
@@ -6,20 +6,7 @@ and review the diff of tests/snapshots/ like any other change.
 import re
 from pathlib import Path
 
-import pytest
-from helpers import commit, drag, mako, mcp_instructions, ok, set_config, snapshot, type_card
-
-
-@pytest.mark.parametrize("agent", ["agent-a", "orchestrator"])
-@pytest.mark.parametrize("review", [False, True], ids=["no-review", "review"])
-def test_guide(ws, request, agent, review):
-    if review:
-        set_config(ws, review_command="difit {base}")
-    guide = ok(ws, "guide", "--agent", agent)
-    # The MCP server's instructions are the same text.
-    assert mcp_instructions(ws, agent).rstrip("\n") == guide.rstrip("\n")
-    suffix = "-review" if review else ""
-    snapshot(request, f"guide-{agent}{suffix}.md", ws.normalize(guide))
+from helpers import commit, drag, mako, ok, snapshot, type_card
 
 
 def test_board(ws, request):

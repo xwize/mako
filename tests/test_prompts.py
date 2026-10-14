@@ -1,7 +1,9 @@
 """Prompt files in .mako/prompts/: missing, edited, braces, and upgrades."""
+import re
 import shutil
 
-from helpers import SRC, mako, ok
+import pytest
+from helpers import SRC, mako, mcp_instructions, ok, set_config
 
 PROMPTS = ("common", "worker", "orchestrator", "review", "cli", "claude-pointer")
 
@@ -14,6 +16,39 @@ def test_init_installs_every_prompt(ws):
     for name in PROMPTS:
         assert (prompts(ws) / f"{name}.txt").is_file(), name
     assert (prompts(ws) / ".installed.json").is_file()
+
+
+def expected_guide(ws, agent: str, review: bool) -> str:
+    """The guide built from the shipped templates: common + worker (+ review) or
+    orchestrator, then cli, separated by blank lines, placeholders filled. The
+    wording can change freely; only how the parts are put together is checked."""
+    worker = agent != "orchestrator"
+    values = {"root": str(ws.root), "project": "demo", "base": "main", "prefix": "DEMO",
+              "agent": agent if worker else "", "agents": "agent-a, agent-b",
+              "worktree": str(ws.worktree(agent)) if worker else "",
+              "review_cli": "`mako review <ID>` (reopen the review tool),\n" if review else ""}
+    names = ["common", *(["worker", *(["review"] if review else [])] if worker else ["orchestrator"]), "cli"]
+    parts = []
+    for name in names:
+        text = (SRC / "templates" / "prompts" / f"{name}.txt").read_text(encoding="utf-8")
+        text = text.replace("\r\n", "\n").strip("\n")
+        for key, value in values.items():
+            text = text.replace("{" + key + "}", value)
+        parts.append(text)
+    return "\n\n".join(parts) + "\n"
+
+
+@pytest.mark.parametrize("agent", ["agent-a", "orchestrator"])
+@pytest.mark.parametrize("review", [False, True], ids=["no-review", "review"])
+def test_guide_is_assembled_from_the_prompt_files(ws, agent, review):
+    if review:
+        set_config(ws, review_command="difit {base}")
+    # What agents get: the MCP server's instructions.
+    guide = mcp_instructions(ws, agent)
+    assert guide == expected_guide(ws, agent, review)
+    assert not re.search(r"\{(root|project|base|prefix|agent|agents|worktree|review_cli)\}", guide)
+    # `mako guide` prints the same text.
+    assert ok(ws, "guide", "--agent", agent).rstrip("\n") == guide.rstrip("\n")
 
 
 def test_missing_file_shows_the_message_and_init_restores_it(ws):
