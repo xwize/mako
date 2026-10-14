@@ -94,6 +94,24 @@ def git_ok(cwd: Path, *args: str) -> bool:
     return _git(cwd, *args).returncode == 0
 
 
+def git_file(cwd: Path, rev: str, path: str) -> bytes | None:
+    """A file's bytes at rev (None if it isn't there). Bytes, so the text isn't re-encoded."""
+    r = subprocess.run(["git", "-C", str(cwd), "show", f"{rev}:{path}"], capture_output=True,
+                       stdin=subprocess.DEVNULL, check=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def commit_file(wt: Path, path: str, data: bytes, message: str) -> None:
+    """Write a file in a worktree and commit just that file (Mako's own commits)."""
+    target = wt / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    ident = [] if _git(wt, "config", "user.email").stdout.strip() else \
+        ["-c", "user.name=Mako", "-c", "user.email=mako@localhost"]
+    git(wt, "add", "--", path)
+    git(wt, *ident, "commit", "-q", "-m", message, "--", path)
+
+
 def is_clean(cwd: Path) -> bool:
     return git(cwd, "status", "--porcelain") == ""
 
@@ -216,6 +234,22 @@ CARD_BODY = """
 
 """
 
+# A spike's summary: on its branch at .mako_spikes/spike_<ID>_<slug>.md, written by Mako
+# at claim time (frontmatter filled in), the body by the agent.
+SPIKE_DIR = ".mako_spikes"
+SUMMARY_FIELDS = ("id", "title", "agent", "created", "branch", "closed")
+SUMMARY_BODY = """
+# {title}
+
+## Summary
+
+_TBD_
+
+## Findings
+
+## Recommendation
+"""
+
 
 def cycle_from(graph: dict, start: str) -> list[str] | None:
     """A path start -> ... -> start through graph (id -> dependency ids), if there is one."""
@@ -260,6 +294,8 @@ class Mako:
         self.review_command = str(self.config.get("review_command") or "").strip()
         # On: close keeps the merged branch and names it in the merge commit. Off: it's deleted.
         self.keep_branches = self.config.get("keep_branches") is True
+        # Pre-fills publish_to on new spikes. Empty: no default.
+        self.spike_publish_to = str(self.config.get("spike_publish_to") or "").strip()
         self.kanban = root / "kanban"
         self.open_dir = self.kanban / "open"
         self.closed_dir = self.kanban / "closed"
@@ -318,6 +354,19 @@ class Mako:
 
     def folder_for(self, status: str) -> Path:
         return {"done": self.closed_dir, "discarded": self.discarded_dir}.get(status, self.open_dir)
+
+    def summary_path(self, card: Card) -> str:
+        """A spike's summary file, relative to the repo (fixed at its first claim)."""
+        return card.meta.get("summary") or f"{SPIKE_DIR}/spike_{card.id}_{slugify(card.title)}.md"
+
+    def publish_target(self, card: Card) -> Path | None:
+        """Where closing copies a spike's summary: <publish_to>/<summary file name>,
+        relative paths against the workspace root. None when publish_to is empty."""
+        folder = str(card.meta.get("publish_to") or "").strip()
+        if not folder:
+            return None
+        base = Path(folder)
+        return (base if base.is_absolute() else self.root / base) / Path(self.summary_path(card)).name
 
     def save(self, card: Card) -> None:
         """Write the card into the folder for its status: open/, closed/ or discarded/."""
@@ -647,11 +696,14 @@ class Mako:
 
     # operations (call through transact)
 
-    def _new(self, kind: str, title: str, description: str, depends=None, human: bool = False) -> Card:
+    def _new(self, kind: str, title: str, description: str, depends=None, human: bool = False,
+             publish_to: str | None = None) -> Card:
         if kind not in TYPES:
             raise MakoError(f"type must be one of {', '.join(TYPES)}")
         if not title.strip():
             raise MakoError("title is required")
+        if publish_to and kind != "spike":
+            raise MakoError("publish_to is for spikes only")
         cid = self.next_id()
         deps = self.parse_ids(depends)
         self.check_deps(cid, deps)
@@ -659,6 +711,8 @@ class Mako:
                 "status": "backlog", "created": now()}
         if human:
             meta["human"] = "true"
+        if kind == "spike":
+            meta["publish_to"] = (self.spike_publish_to if publish_to is None else publish_to).strip()
         card = Card(self.open_dir / f"{cid}.md", meta,
                     CARD_BODY.format(title=title.strip(), description=description.strip() or "_TBD_"))
         self.save(card)
@@ -709,13 +763,37 @@ class Mako:
         owner = {"id": cid, "agent": agent, "branch": branch, "worktree": str(wt), "claimed": now()}
         (lock_dir / "owner.json").write_text(json.dumps(owner, indent=2), encoding="utf-8")
         card.meta.update(status="in-progress", branch=branch, claimed_by=agent, claimed=now())
+        if card.meta.get("type") == "spike":
+            card.meta["summary"] = self.summary_path(card)
+            try:
+                self._start_summary(card, wt, agent)
+            except MakoError as e:
+                _git(wt, "reset", "-q", "--hard")
+                _git(wt, "switch", "--detach", self.base)
+                shutil.rmtree(lock_dir, ignore_errors=True)
+                raise MakoError(f"could not write the spike summary in {agent}'s worktree: {e}") from None
         self.save(card)
         return self._claim_info(card, agent)
 
+    def _start_summary(self, card: Card, wt: Path, agent: str) -> None:
+        """Commit the spike's summary file, frontmatter filled in, onto its branch in the
+        slot's worktree, so the worktree stays clean. A resumed spike keeps the one it has."""
+        path = card.meta["summary"]
+        if (wt / path).is_file():
+            return
+        meta = {"id": card.id, "title": card.title, "agent": agent, "created": now(),
+                "branch": card.meta["branch"], "closed": ""}
+        lines = ["---", *(f"{k}: {_yaml_value(meta[k])}" for k in SUMMARY_FIELDS), "---"]
+        text = "\n".join(lines) + "\n" + SUMMARY_BODY.format(title=card.title)
+        commit_file(wt, path, text.encode("utf-8"), f"{card.id}: spike summary")
+
     def _claim_info(self, card: Card, agent: str) -> dict:
-        return {"id": card.id, "title": card.title, "type": card.meta.get("type"),
+        info = {"id": card.id, "title": card.title, "type": card.meta.get("type"),
                 "branch": card.meta.get("branch"), "worktree": str(self.worktree(agent)),
                 "card": str(card.path)}
+        if card.meta.get("type") == "spike":
+            info["summary"] = str(self.worktree(agent) / self.summary_path(card))
+        return info
 
     def _check_owner(self, cid: str, lock: dict, agent: str | None, force: bool) -> None:
         # Humans (no identity) and the orchestrator may act on any claim; a worker
@@ -759,6 +837,9 @@ class Mako:
             if wt.is_dir() and current_branch(wt) == branch and not is_clean(wt):
                 raise MakoError(f"{lock.get('agent')}'s worktree has uncommitted changes on {branch}; "
                                 "commit them first")
+        published = None
+        if spike:
+            published = self._finish_summary(card, wt if wt and current_branch(wt) == branch else None, force)
         pending = unmerged_commits(self.project, branch, self.base)
         if gate and self.review_command and lock and pending and not force and not spike:
             head = git(self.project, "rev-parse", branch)
@@ -777,11 +858,39 @@ class Mako:
             card.meta["merged"] = now()
         if spike:
             kept = f"; branch kept: {branch}" if pending else ""
-            note = f"Spike closed without merging{kept}.\n\n{note.strip()}"
+            where = f" Summary published to {published}." if published else ""
+            if published:
+                self.note(f"published {card.id}'s summary to {published} (not committed)")
+            note = f"Spike closed without merging{kept}.{where}\n\n{note.strip()}"
         card.meta.update(status="done", closed=now())
         self._append(card, "Closing note", agent, note)
         self.save(card)
         return card
+
+    def _finish_summary(self, card: Card, wt: Path | None, force: bool) -> Path | None:
+        """On closing a spike: fill in the summary's `closed` (committed in the slot's
+        worktree, when it is on the branch) and copy it to publish_to, if set. A plain
+        copy, never committed; a re-close overwrites it. With publish_to set, a missing
+        summary is refused unless forced."""
+        branch, path = card.meta.get("branch", ""), self.summary_path(card)
+        target = self.publish_target(card)
+        data = git_file(self.project, branch, path) if branch and branch_exists(self.project, branch) else None
+        if data is None:
+            if target and not force:
+                raise MakoError(f"{card.id} has no summary {path} on {branch or 'its branch'} to publish "
+                                f"to {card.meta['publish_to']}; write and commit it, or close with --force")
+            if target:
+                self.note(f"warning: {card.id} has no summary {path}; nothing was published")
+            return None
+        text = data.decode("utf-8").replace("\r\n", "\n")
+        filled = re.sub(r"\A(---\n(?:(?!---\n).*\n)*?)closed:[^\n]*\n", lambda mm: f"{mm.group(1)}closed: "
+                        f"{_yaml_value(now())}\n", text, count=1)
+        if wt and filled != text:
+            commit_file(wt, path, filled.encode("utf-8"), f"{card.id}: spike summary closed")
+        if target:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(filled.encode("utf-8"))
+        return target
 
     def _merge_into_base(self, cid: str, branch: str) -> None:
         if not git_ok(self.project, "merge-base", "--is-ancestor", self.base, branch):
@@ -912,9 +1021,10 @@ class Mako:
 
     def _edit(self, cid: str, title: str | None, kind: str | None,
               description: str | None, append: str | None,
-              depends=None, add_deps=None, remove_deps=None, human=None) -> Card:
-        """Change a Backlog card's title, type, body, dependencies or human marker. Holds the issue's claim
-        lock while checking and writing, so a claim and an edit can't overlap."""
+              depends=None, add_deps=None, remove_deps=None, human=None, publish_to=None) -> Card:
+        """Change a Backlog card's title, type, body, dependencies, human marker or (spikes)
+        publish_to. Holds the issue's claim lock while checking and writing, so a claim and
+        an edit can't overlap. publish_to alone may also change while the spike is In Progress."""
         card = self.get(cid)
         cid = card.id
         if card.status in ("done", "discarded"):
@@ -922,6 +1032,14 @@ class Mako:
             raise MakoError(f"{cid} is {state}; `mako reopen {cid}` it first")
         if kind is not None and kind not in TYPES:
             raise MakoError(f"type must be one of {', '.join(TYPES)}")
+        if publish_to is not None:
+            if (kind or card.meta.get("type")) != "spike":
+                raise MakoError("publish_to is for spikes only")
+            others = (title, kind, description, append, depends, add_deps, remove_deps, human)
+            if card.status == "in-progress" and all(v is None for v in others):
+                card.meta["publish_to"] = publish_to.strip()
+                self.save(card)
+                return card
         if title is not None and not title.strip():
             raise MakoError("title can't be empty")
         lock_dir = self.locks / cid
@@ -944,6 +1062,10 @@ class Mako:
                                    lambda _: f"# {title.strip()}", card.body, count=1)
             if kind is not None:
                 card.meta["type"] = kind
+                if kind == "spike":
+                    card.meta.setdefault("publish_to", self.spike_publish_to)
+                else:
+                    card.meta.pop("publish_to", None)
             if description is not None:
                 text = description.strip() or "_TBD_"
                 section = re.compile(r"(?ms)^(## Description[ \t]*\n).*?(?=^## |\Z)")
@@ -965,6 +1087,8 @@ class Mako:
                     card.meta["human"] = "true"
                 else:
                     card.meta.pop("human", None)
+            if publish_to is not None:
+                card.meta["publish_to"] = publish_to.strip()
             self.save(card)
         finally:
             shutil.rmtree(lock_dir, ignore_errors=True)
@@ -1031,8 +1155,8 @@ class Mako:
 
     # public API
 
-    def new(self, kind, title, description="", depends=None, human=False):
-        return self.transact(lambda: self._new(kind, title, description, depends, human))
+    def new(self, kind, title, description="", depends=None, human=False, publish_to=None):
+        return self.transact(lambda: self._new(kind, title, description, depends, human, publish_to))
 
     def claim(self, cid, agent):
         return self.transact(lambda: self._claim(cid, agent))
@@ -1059,9 +1183,9 @@ class Mako:
         return self.transact(lambda: self._prune(ids, dry_run, discarded))
 
     def edit(self, cid, title=None, kind=None, description=None, append=None,
-             depends=None, add_deps=None, remove_deps=None, human=None):
+             depends=None, add_deps=None, remove_deps=None, human=None, publish_to=None):
         return self.transact(lambda: self._edit(cid, title, kind, description, append,
-                                                depends, add_deps, remove_deps, human))
+                                                depends, add_deps, remove_deps, human, publish_to))
 
     def sync(self):
         return self.transact(lambda: None)
@@ -1122,14 +1246,24 @@ def fmt_show(m: Mako, card: Card) -> str:
     text = card.path.read_text(encoding="utf-8")
     if dep := fmt_deps(m, card):
         text = text.rstrip("\n") + f"\n\n({card.id} {dep})\n"
+    if card.meta.get("type") == "spike":
+        target = m.publish_target(card)
+        if not target:
+            where = "not published (publish_to is empty)"
+        elif card.status == "done":
+            where = f"published to {target}" if target.is_file() else f"not published to {target}"
+        else:
+            where = f"copied to {target} on close"
+        text = text.rstrip("\n") + f"\n\n(spike summary: {m.summary_path(card)} on its branch; {where})\n"
     return text
 
 
 def fmt_claim(info: dict) -> str:
+    summary = f"\n  summary:  {info['summary']}" if info.get("summary") else ""
     return (f"Claimed {info['id']}: {info['title']}\n"
             f"  branch:   {info['branch']}\n"
             f"  worktree: {info['worktree']}\n"
-            f"  card:     {info['card']}")
+            f"  card:     {info['card']}{summary}")
 
 
 def fmt_close(m: Mako, card: Card) -> str:
@@ -1207,11 +1341,15 @@ MCP_TOOLS = [
                         "description": "Issues that must be Done before this one can be claimed."},
          "human": {"type": "boolean",
                    "description": "A task for the user, not for agents: agents can't claim or close it; "
-                                  "the user moves it on the board. Agent issues can depend on it."}},
+                                  "the user moves it on the board. Agent issues can depend on it."},
+         "publish_to": {"type": "string",
+                        "description": "Spikes only: folder that closing copies the spike's summary into "
+                                       "(relative to the workspace root). Omit for the config default."}},
          "required": ["type", "title"]}},
     {"name": "edit_issue",
      "description": "Change a Backlog issue's title, type or description, or append a note. "
-                    "Refused once the issue is claimed (In Progress) or closed (Done).",
+                    "Refused once the issue is claimed (In Progress) or closed (Done), except a spike's "
+                    "publish_to, which can also change while it is In Progress.",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"},
          "title": {"type": "string"},
@@ -1222,7 +1360,9 @@ MCP_TOOLS = [
                         "description": "Replaces the dependency list ([] clears it)."},
          "add_depends": {"type": "array", "items": {"type": "string"}},
          "remove_depends": {"type": "array", "items": {"type": "string"}},
-         "human": {"type": "boolean", "description": "Mark (true) or unmark (false) it as the user's own task."}},
+         "human": {"type": "boolean", "description": "Mark (true) or unmark (false) it as the user's own task."},
+         "publish_to": {"type": "string",
+                        "description": "Spikes only: folder the summary is copied into on close ('' clears)."}},
          "required": ["id"]}},
     {"name": "claim_issue",
      "description": "Claim an issue for your slot: locks it, checks out its branch in your worktree, "
@@ -1234,7 +1374,8 @@ MCP_TOOLS = [
      "description": "Finish your issue: merges your branch into the base branch, moves the card to Done "
                     "and frees your slot (worktree goes back to detached base). First commit everything "
                     "and run `git merge <base>` in your worktree, resolving any conflicts; close refuses "
-                    "a branch that is behind the base branch.",
+                    "a branch that is behind the base branch. A spike never merges: commit its summary "
+                    "file first; closing copies it to the card's publish_to, if set.",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string"},
          "note": {"type": "string", "description": "What changed and how it was tested."}},
@@ -1278,11 +1419,11 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         return fmt_show(m, card)
     if name == "create_issue":
         card = m.new(args["type"], args["title"], args.get("description", ""), args.get("depends_on"),
-                     bool(args.get("human")))
+                     bool(args.get("human")), args.get("publish_to"))
         result = f"Created {card.id}: {card.title}"
     elif name == "edit_issue":
         keys = ("title", "type", "description", "append", "depends_on", "add_depends", "remove_depends",
-                "human")
+                "human", "publish_to")
         fields = [args.get(k) for k in keys]
         if all(v is None for v in fields):
             raise MakoError(f"nothing to change: pass {', '.join(keys)}")
@@ -1566,6 +1707,7 @@ class Init:
                 self.log.append("kept existing .mako/config.json (edit it to change prefix, agents or base)")
             config.setdefault("review_command", "")  # listed so they can be found; never changed
             config.setdefault("keep_branches", False)
+            config.setdefault("spike_publish_to", "")
             return config
         if not project:
             raise MakoError("usage: mako init <project_name>")
@@ -1581,7 +1723,7 @@ class Init:
         if len(set(agents)) != len(agents):
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
-                "review_command": "", "keep_branches": False}
+                "review_command": "", "keep_branches": False, "spike_publish_to": ""}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
         """Write only if the content changed, and log it."""
@@ -1756,6 +1898,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--depends", help="comma-separated issues that must be Done first")
     s.add_argument("--human", action="store_true",
                    help="your own task: agents can't claim it, and it moves freely on the board")
+    s.add_argument("--publish-to", help="spikes: folder to copy the summary into on close "
+                                        "(default: spike_publish_to in config.json)")
 
     s = sub.add_parser("list", help="list issues")
     s.add_argument("--all", action="store_true", help="include Done")
@@ -1777,6 +1921,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="mark it as your own task (agents can't claim it)")
     g.add_argument("--no-human", dest="human", action="store_const", const=False,
                    help="hand it back to the agents")
+    s.add_argument("--publish-to", help="spikes: folder to copy the summary into on close ('' clears); "
+                                        "also while In Progress")
 
     for name, text in (("depend", "make an issue wait for others to be Done"),
                        ("undepend", "remove dependencies from an issue")):
@@ -1843,7 +1989,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         m = Mako(find_root())
         if a.cmd == "new":
-            card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human)
+            card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human, a.publish_to)
             out = f"Created {card.id}: {card.title}"
         elif a.cmd == "list":
             m.sync()
@@ -1863,10 +2009,11 @@ def main(argv: list[str] | None = None) -> int:
                     desc = Path(a.description_file).read_text(encoding="utf-8")
                 except OSError as e:
                     raise MakoError(f"can't read {a.description_file}: {e.strerror}") from None
-            if all(v is None for v in (a.title, a.type, desc, a.append, a.depends, a.human)):
+            if all(v is None for v in (a.title, a.type, desc, a.append, a.depends, a.human, a.publish_to)):
                 out = fmt_show(m, m.get(a.id))
             else:
-                card = m.edit(a.id, a.title, a.type, desc, a.append, a.depends, human=a.human)
+                card = m.edit(a.id, a.title, a.type, desc, a.append, a.depends, human=a.human,
+                              publish_to=a.publish_to)
                 out = f"Edited {card.id}: {card.title}"
         elif a.cmd == "guide":
             out = guide(m, a.agent)

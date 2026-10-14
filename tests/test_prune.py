@@ -92,7 +92,7 @@ def test_prune_by_id_and_skips_a_spike_branch(ws):
     out = ok(ws, "prune")
     assert f"deleted {ONE} (DEMO-0001)" in out
     assert ("skipped spike/DEMO-0003-look (DEMO-0003): not fully merged, "
-            "1 commit not in main (a spike's branch)") in out
+            "3 commits not in main (a spike's branch)") in out  # summary, look.txt, summary closed
     assert branch_exists(ws, "spike/DEMO-0003-look")
 
 

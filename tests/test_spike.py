@@ -45,11 +45,13 @@ def test_spike_closed_from_the_cli(ws):
     assert not (ws.repo / "spike.txt").exists()
 
 
-def test_spike_without_commits_leaves_no_branch(ws):
+def test_spike_without_work_still_keeps_its_summary_branch(ws):
+    # Claiming commits the summary file, so a spike's branch always has something to keep.
     ok(ws, "new", "spike", "Empty")
     ok(ws, "claim", "DEMO-0001", "--agent", "agent-a")
-    assert ok(ws, "close", "DEMO-0001").strip() == "Closed spike DEMO-0001 without merging."
-    assert not branch_exists(ws, "spike/DEMO-0001-empty")
+    text = ok(ws, "close", "DEMO-0001").strip()
+    assert text == "Closed spike DEMO-0001 without merging; branch kept: spike/DEMO-0001-empty."
+    assert git(ws, "show", "spike/DEMO-0001-empty:.mako_spikes/spike_DEMO-0001_empty.md")
 
 
 def test_reopened_spike_retyped_as_feature_merges(ws):
