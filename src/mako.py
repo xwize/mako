@@ -893,8 +893,12 @@ if /i "%SLOT%"=="orchestrator" (
 
 LAUNCH_BAT = """\
 @echo off
-rem Opens Windows Terminal with the orchestrator on the left (pane 0)
-rem and the worker slots stacked on the right:
+rem Opens Windows Terminal with the orchestrator and the worker slots side by
+rem side in equal-width columns, left to right:
+rem
+{diagram}
+rem
+rem   pane 0: orchestrator
 {panes}
 rem
 rem Each split names the pane it splits with focus-pane, so the layout never
@@ -911,18 +915,25 @@ wt -w new ^
 
 def launch_bat(agents: list[str]) -> str:
     # Pane ids follow creation order: orchestrator 0, then slot k is pane k.
-    # Slot 1 splits the right half off pane 0; each later slot splits the pane
-    # above it, taking the share that keeps the right column evenly stacked.
+    # Each slot splits the pane to its left vertically; wt's --size is the share
+    # the new pane takes, so pane k-1 hands over (n-k+1)/(n-k+2) of its width,
+    # leaving every column 1/(n+1) of the window.
     pane = '--title {0} --suppressApplicationTitle -d "{1}" cmd /k "%AGENT%" {0}'
     cmds = ["new-tab " + pane.format("orchestrator", "%ROOT%")]
     n = len(agents)
     for k, slot in enumerate(agents, 1):
         cmds.append(f"focus-pane -t {k - 1}")
-        split = "-V --size 0.5" if k == 1 else f"-H --size {(n - k + 1) / (n - k + 2):.3g}"
-        cmds.append(f"split-pane {split} " + pane.format(slot, f"%WT%\\{slot}"))
+        size = (n - k + 1) / (n - k + 2)
+        cmds.append(f"split-pane -V --size {size:.3g} " + pane.format(slot, f"%WT%\\{slot}"))
     cmds.append("focus-pane -t 0")
+    names = ["orchestrator", *agents]
+    width = max(map(len, names)) + 2
+    rule = "rem   +" + "+".join("-" * width for _ in names) + "+"
+    row = lambda cells: "rem   |" + "|".join(c.center(width) for c in cells) + "|"
+    blank = row([""] * len(names))
+    diagram = "\n".join([rule, blank, row(names), blank, rule])
     panes = "\n".join(f"rem   pane {k}: {slot}" for k, slot in enumerate(agents, 1)) or "rem   (no slots)"
-    return LAUNCH_BAT.format(panes=panes, commands=" ; ^\n  ".join(cmds))
+    return LAUNCH_BAT.format(diagram=diagram, panes=panes, commands=" ; ^\n  ".join(cmds))
 
 
 def mcp_config(script: Path, agent: str) -> str:
