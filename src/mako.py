@@ -24,6 +24,7 @@ its worktree; close refuses a branch that is behind the base branch.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -935,27 +936,8 @@ This workspace uses Mako: a kanban board plus fixed agent slots, each with its o
   the Backlog.
 """
 
-GUIDE_WORKER = """
-## You are worker slot `{agent}`
-
-Your worktree is {worktree}. Change code only there, never in {project}/ (the main checkout) or
-another slot's worktree, and never run git commands in {project}/.
-
-1. Claim before working: `claim_issue` (or `claim_next`). This checks out the issue branch
-   `<type>/<ID>-<slug>` in your worktree. You hold one issue at a time. Issues whose
-   `depends_on` aren't all Done are blocked: claiming them fails and `claim_next` skips them.
-2. Read the card with `get_issue`.
-3. Commit on the issue branch, starting messages with the id: `{prefix}-0002: short summary`.
-4. To finish:
-   {{worker.finish}}
-   It merges your branch into `{base}`, moves the card to Done and frees your slot. If it says your
-   branch is behind `{base}`, another worker merged first: repeat steps 2-4.
-5. If you cannot finish, commit what you have and call `release_issue` with a note. The branch is
-   kept and the next claim resumes it.
-6. If the user decides an issue won't be done, call `discard_issue` with a note. You can discard
-   your own claim or an unclaimed Backlog issue, never another slot's. Pass any warnings it
-   returns (kept branch, blocked dependents) on to the user.
-"""
+# The worker's part of the guide is not here: it lives in .mako/prompts/worker.txt
+# (shipped as templates/prompts/worker.txt) so users can edit it. See guide().
 
 GUIDE_ORCHESTRATOR = """
 ## You are the orchestrator
@@ -990,27 +972,26 @@ def guide(m: "Mako", agent: str | None) -> str:
     values = {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
               "agent": agent, "agents": ", ".join(m.agents),
               "worktree": m.worktree(agent) if agent else ""}
-    role = GUIDE_WORKER if agent in m.agents else GUIDE_ORCHESTRATOR
-    text = (GUIDE_COMMON + role + GUIDE_CLI).format(**values)
-    # After format(), so braces in the user's file never reach it.
-    return text.replace("{worker.finish}", prompt(m, "worker.finish", values, indent="   "))
+    if agent not in m.agents:
+        return (GUIDE_COMMON + GUIDE_ORCHESTRATOR + GUIDE_CLI).format(**values)
+    # The worker part is user text: it never goes through format().
+    return (GUIDE_COMMON.format(**values) + "\n" + prompt(m, "worker", values) + "\n"
+            + GUIDE_CLI.format(**values))
 
 
-def prompt(m: "Mako", name: str, values: dict, indent: str) -> str:
+def prompt(m: "Mako", name: str, values: dict) -> str:
     """The user-editable text in .mako/prompts/<name>.txt, read fresh each time.
     Only the guide's own placeholders are substituted (plain replace, so other
-    braces pass through). Lines after the first get `indent`, to sit under the
-    list item the placeholder is in. A missing file says so instead of hiding it."""
+    braces pass through). A missing file says so instead of hiding it."""
     path = m.dir / "prompts" / f"{name}.txt"
     try:
         text = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip("\n")
     except FileNotFoundError:
-        return (f"**`.mako/prompts/{name}.txt` is missing, so these steps can't be shown. "
+        return (f"**`.mako/prompts/{name}.txt` is missing, so your instructions can't be shown. "
                 "Tell the user to run `mako init` to restore it.**")
-    for key in ("root", "project", "base", "prefix", "agent", "worktree"):
-        text = text.replace("{" + key + "}", str(values[key] or ""))
-    return "\n".join(line and indent + line if i else line
-                     for i, line in enumerate(text.split("\n")))
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", str(value or ""))
+    return text
 
 
 MCP_TOOLS = [
@@ -1305,6 +1286,11 @@ def mcp_config(script: Path, agent: str) -> str:
     return json.dumps({"mcpServers": {"mako": server}}, indent=2) + "\n"
 
 
+# .mako/prompts/worker.finish.txt as the first version of MAKO-0012 shipped it
+# (CRLF -> LF, outer newlines stripped). worker.txt replaced it; init removes it if unedited.
+LEGACY_WORKER_FINISH_SHA256 = "d0aef799393329d25053f2fd53d7f9f29aefa5ab0541acce7e6960d5104efcbe"
+
+
 def same_path(a, b) -> bool:
     return Path(a).resolve() == Path(b).resolve()
 
@@ -1442,6 +1428,21 @@ class Init:
             if not dst.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 self.write(dst, src.read_bytes())
+        self.retire_prompt("worker.finish.txt", LEGACY_WORKER_FINISH_SHA256, "worker.txt")
+
+    def retire_prompt(self, name: str, default_sha256: str, successor: str) -> None:
+        """A prompt file an older Mako installed: deleted if it is still the shipped
+        default, otherwise kept (it's the user's work) with a note to move it."""
+        path = self.dir / "prompts" / name
+        if not path.is_file():
+            return
+        text = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip("\n")
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() == default_sha256:
+            path.unlink()
+            self.log.append(f"removed .mako/prompts/{name} (unchanged default, replaced by {successor})")
+        else:
+            self.log.append(f"note: .mako/prompts/{name} is no longer used and was left as it is; "
+                            f"move your changes into .mako/prompts/{successor}, then delete it")
 
     def obsidian(self, project: str) -> None:
         tpl = Path(__file__).resolve().parent / "templates" / "obsidian"
