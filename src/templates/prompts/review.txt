@@ -1,0 +1,10 @@
+## Code review
+
+This workspace reviews each issue before it merges. When your branch is ready to close
+(everything committed, `{base}` merged in, tests passing):
+
+1. Call `request_review`. It opens the review for the user. End your turn and wait.
+2. The user replies "approve" or sends comments. On comments, fix them, commit and call
+   `request_review` again.
+3. Only after the user approves, call `close_issue`. It refuses while the branch has commits
+   the last `request_review` didn't cover.

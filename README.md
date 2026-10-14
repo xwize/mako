@@ -81,8 +81,27 @@ touches your cards, config or repo history.
   mako.launch.bat                Windows Terminal: orchestrator + one pane per slot
   .obsidian/                     Kanban and Advanced Exclude plugins, pre-enabled
   .mako/                         Mako itself: code, config, locks, slot worktrees
-  .mako/prompts/worker.txt       the worker agents' instructions; yours to edit (init never overwrites it)
+  .mako/prompts/                 everything agents are told; yours to edit (see below)
 ```
+
+### Editing what agents are told
+
+Each agent's guide (the `mako` MCP server's instructions, also `mako guide`) is built fresh from
+the files in `.mako/prompts/`:
+
+| File | Part |
+| --- | --- |
+| `common.txt` | top of every guide: the workspace and the rules |
+| `worker.txt` | a worker slot's role and how to finish an issue |
+| `orchestrator.txt` | the orchestrator's role |
+| `review.txt` | the code review steps, shown to workers only when `review_command` is set |
+| `cli.txt` | the CLI list at the end of every guide |
+| `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
+
+They can use `{root}`, `{project}`, `{base}`, `{prefix}`, `{agent}`, `{agents}` and `{worktree}`;
+other braces are left as they are. A deleted file shows a "missing" message in its place, and
+`mako init` restores it. On an upgrade, a file you haven't changed follows the new default; one
+you have edited is kept, with a note pointing at the new default in `.mako/templates/prompts/`.
 
 ### Next steps
 

@@ -980,82 +980,20 @@ def fmt_slots(m: Mako) -> str:
 
 # --- MCP server (stdio, newline-delimited JSON-RPC) ------------------------------
 
-GUIDE_COMMON = """\
-# Mako
-
-This workspace uses Mako: a kanban board plus fixed agent slots, each with its own git worktree.
-
-- Workspace root: {root}
-- Project repo: {project}/ (main checkout, branch `{base}`).
-- Issues: cards like `{prefix}-0001` in kanban/open and kanban/closed, shown on kanban/board.md (Obsidian).
-- Lifecycle: Backlog -> In Progress (claim) -> Done (close). Closing merges the issue branch into
-  `{base}`, so nothing reaches Done unmerged.
-- Discarding (`discard_issue`, `mako discard`) drops an issue that won't be done: it leaves the
-  board for kanban/discarded, nothing is merged and any branch is kept. `mako reopen` undoes it.
-- Mako owns kanban/. Never edit those files directly; use the mako tools. To change a card's
-  title, type or description, use `edit_issue` (`mako edit`); it only works while the card is in
-  the Backlog.
-"""
-
-# The worker's part of the guide is not here: it lives in .mako/prompts/worker.txt
-# (shipped as templates/prompts/worker.txt) so users can edit it. See guide().
-
-GUIDE_ORCHESTRATOR = """
-## You are the orchestrator
-
-You run at the workspace root. Worker slots: {agents}.
-
-- Write issues with `create_issue` and refine Backlog ones with `edit_issue`; check progress
-  with `list_issues`, `get_issue` and `mako status`.
-- When an issue needs another one finished first, give it `depends_on` (on `create_issue`, or
-  `add_depends` / `remove_depends` on `edit_issue`). It can't be claimed until those are Done.
-- Do not claim issues and do not merge: workers merge their own work when they close.
-- `release_issue` returns a stuck issue to the Backlog; `mako reopen <ID>` reopens a closed one.
-- `discard_issue` drops an issue the user doesn't want done (any open issue, with a note). Pass
-  its warnings on: a kept branch to delete, and dependents to `mako undepend`.
-"""
-
-GUIDE_CLI = """
-## CLI
-
-`mako` is on PATH in panes started by mako.launch.bat:
-`mako list [--all]`, `mako status`, `mako show <ID>`, `mako new <feature|bug|spike> "title"`,
-`mako edit <ID> [--title ..] [--type ..] [--description ..|--description-file ..] [--append ..]`,
-`mako new .. --depends <ID,..>`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
-`mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`,
-`mako discard <ID> [--note ".."] [--force]`, `mako reopen <ID>` (closed or discarded),
-{review_cli}`mako launch [slot]`, `mako resume [slot]` (reopen the panes, each continuing its last
-conversation), `mako guide`, `mako init` (re-run to upgrade the generated files).
-"""
-
-
-GUIDE_REVIEW = """
-## Code review
-
-This workspace reviews each issue before it merges. When your branch is ready to close
-(everything committed, `{base}` merged in, tests passing):
-
-1. Call `request_review`. It opens the review for the user. End your turn and wait.
-2. The user replies "approve" or sends comments. On comments, fix them, commit and call
-   `request_review` again.
-3. Only after the user approves, call `close_issue`. It refuses while the branch has commits
-   the last `request_review` didn't cover.
-"""
-
+# Everything agents are told lives in .mako/prompts/*.txt (shipped as templates/prompts/)
+# so users can edit it. The guide is common + worker or orchestrator (+ review) + cli.
 
 def guide(m: "Mako", agent: str | None) -> str:
     values = {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
               "agent": agent, "agents": ", ".join(m.agents),
-              "worktree": m.worktree(agent) if agent else ""}
-    # Review text appears only when review_command is set; otherwise the guide is as before.
-    cli = GUIDE_CLI.format(**values, review_cli="`mako review <ID>` (reopen the review tool),\n"
-                           if m.review_command else "")
+              "worktree": m.worktree(agent) if agent else "",
+              # Review text appears only when review_command is set; otherwise the guide is as before.
+              "review_cli": "`mako review <ID>` (reopen the review tool),\n" if m.review_command else ""}
     if agent not in m.agents:
-        return (GUIDE_COMMON + GUIDE_ORCHESTRATOR).format(**values) + cli
-    # The worker part is user text: it never goes through format(). Code review is
-    # Mako's text, added after it, so worker.txt never needs editing for it.
-    review = GUIDE_REVIEW.format(**values) if m.review_command else ""
-    return GUIDE_COMMON.format(**values) + "\n" + prompt(m, "worker", values) + "\n" + review + cli
+        names = ["common", "orchestrator", "cli"]
+    else:
+        names = ["common", "worker", *(["review"] if m.review_command else []), "cli"]
+    return "\n\n".join(prompt(m, n, values) for n in names) + "\n"
 
 
 def prompt(m: "Mako", name: str, values: dict) -> str:
@@ -1276,9 +1214,6 @@ def has_session(cwd: Path) -> bool:
 
 # --- init ------------------------------------------------------------------------
 
-CLAUDE_POINTER = ("This workspace uses Mako for issues and multi-agent work; the `mako` MCP server's "
-                  "instructions (and its `guide` tool) explain your role and the rules.\n")
-
 ROOT_CMD = '@python "%~dp0.mako\\mako.py" %*\n'
 BIN_CMD = '@python "%~dp0..\\mako.py" %*\n'
 BIN_SH = """\
@@ -1381,6 +1316,12 @@ def mcp_config(script: Path, agent: str) -> str:
 LEGACY_WORKER_FINISH_SHA256 = "d0aef799393329d25053f2fd53d7f9f29aefa5ab0541acce7e6960d5104efcbe"
 
 
+def text_sha256(data: bytes) -> str:
+    """sha256 of a text file's content, ignoring line endings and outer newlines."""
+    text = data.decode("utf-8").replace("\r\n", "\n").strip("\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def same_path(a, b) -> bool:
     return Path(a).resolve() == Path(b).resolve()
 
@@ -1413,7 +1354,7 @@ class Init:
         self.prompts()
         self.obsidian(project)
         if not (self.root / "CLAUDE.md").exists():
-            self.write(self.root / "CLAUDE.md", f"{CLAUDE_POINTER}\n# {project}\n")
+            self.claude_md(project)
         Mako(self.root).sync()  # renders kanban/board.md from the cards
         self.log.append(f"\nMako workspace ready: {self.root}\n"
                         f"  Open this folder as an Obsidian vault to see kanban/board.md.\n"
@@ -1509,18 +1450,57 @@ class Init:
             self.write(self.dir / "agents" / f"{agent}.mcp.json", mcp_config(script, agent))
 
     def prompts(self) -> None:
-        """Install the default .mako/prompts/*.txt. Only missing files are written:
-        these are the user's to edit, so upgrades never overwrite them."""
+        """Install the default .mako/prompts/*.txt. These are the user's to edit, so an
+        edited file is never overwritten. .installed.json records what Mako last wrote,
+        so a file still as installed follows the shipped default when that changes."""
         tpl = Path(__file__).resolve().parent / "templates" / "prompts"
         if not tpl.is_dir():
             self.log.append(f"warning: no prompt templates at {tpl}; skipped .mako/prompts/")
             return
+        folder = self.dir / "prompts"
+        folder.mkdir(parents=True, exist_ok=True)
+        record_path = folder / ".installed.json"
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            record = {}
         for src in sorted(tpl.glob("*.txt")):
-            dst = self.dir / "prompts" / src.name
+            dst, name = folder / src.name, f".mako/prompts/{src.name}"
+            new = text_sha256(src.read_bytes())
+            # "installed": what Mako last wrote; "default": the newest default seen.
+            # No record (before MAKO-0014): unedited only if it is the current default.
+            rec = record.get(src.name, {})
             if not dst.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
                 self.write(dst, src.read_bytes())
+                rec = {"installed": new, "default": new}
+            elif (cur := text_sha256(dst.read_bytes())) == new:
+                rec = {"installed": new, "default": new}
+            elif cur == rec.get("installed"):
+                dst.write_bytes(src.read_bytes())
+                self.log.append(f"updated {name} (new default)")
+                rec = {"installed": new, "default": new}
+            elif rec.get("default") != new:
+                # Edited by the user: kept. Said once per new default.
+                why = "the default changed" if rec else "it differs from the default"
+                self.log.append(f"note: {name} is edited, so it was kept; {why}, "
+                                f"see .mako/templates/prompts/{src.name}")
+                rec = {**rec, "default": new}
+            record[src.name] = rec
+        self.write(record_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
         self.retire_prompt("worker.finish.txt", LEGACY_WORKER_FINISH_SHA256, "worker.txt")
+
+    def claude_md(self, project: str) -> None:
+        """A new workspace's CLAUDE.md: the line from .mako/prompts/claude-pointer.txt
+        pointing agents at Mako, then a heading for the user's project text."""
+        path = self.dir / "prompts" / "claude-pointer.txt"
+        try:
+            pointer = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip("\n")
+        except FileNotFoundError:
+            self.log.append("warning: .mako/prompts/claude-pointer.txt is missing; "
+                            "CLAUDE.md was made without the line pointing at Mako")
+            self.write(self.root / "CLAUDE.md", f"# {project}\n")
+            return
+        self.write(self.root / "CLAUDE.md", pointer.replace("{project}", project) + f"\n\n# {project}\n")
 
     def retire_prompt(self, name: str, default_sha256: str, successor: str) -> None:
         """A prompt file an older Mako installed: deleted if it is still the shipped
@@ -1528,8 +1508,7 @@ class Init:
         path = self.dir / "prompts" / name
         if not path.is_file():
             return
-        text = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip("\n")
-        if hashlib.sha256(text.encode("utf-8")).hexdigest() == default_sha256:
+        if text_sha256(path.read_bytes()) == default_sha256:
             path.unlink()
             self.log.append(f"removed .mako/prompts/{name} (unchanged default, replaced by {successor})")
         else:
