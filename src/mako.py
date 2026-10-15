@@ -236,10 +236,11 @@ CARD_BODY = """
 
 # The `## ` headings Mako writes in a card body: CARD_BODY's sections, and the notes
 # _append adds (`## Released (agent-a, <date>)`). Only these end the Description section,
-# so a description may have `## ` headings of its own, just not one of these.
+# so a description may have `## ` headings of its own, just not one of these. Like
+# Markdown, a heading may be indented up to 3 spaces (4 is a code block).
 CARD_SECTIONS = ("Description", "Acceptance criteria", "Notes")
 NOTE_HEADINGS = ("Closing note", "Released", "Discarded", "Reopened")
-MAKO_HEADING = re.compile(rf"## (?:(?:{'|'.join(map(re.escape, CARD_SECTIONS))})"
+MAKO_HEADING = re.compile(rf" {{0,3}}## (?:(?:{'|'.join(map(re.escape, CARD_SECTIONS))})"
                           rf"|(?:{'|'.join(map(re.escape, NOTE_HEADINGS))}) \(.*\))[ \t]*")
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
 

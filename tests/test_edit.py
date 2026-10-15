@@ -43,6 +43,18 @@ def test_mako_headings_in_description_are_refused(ws):
     assert "Old." in card(ws, "DEMO-0001")["_body"]
 
 
+def test_indented_mako_headings_are_refused(ws):
+    for indent in (" ", "  ", "   "):
+        out = fails(ws, "new", "bug", "B", "--body", f"Intro.\n\n{indent}## Notes\n\nx")
+        assert "'## Notes' is a card section" in out
+    # Four spaces is an indented code block in Markdown, not a heading.
+    ok(ws, "new", "bug", "B", "--body", "Intro.\n\n    ## Notes\n\nx")
+    ok(ws, "edit", "DEMO-0001", "--description", "New.")
+    body = card(ws, "DEMO-0001")["_body"]
+    assert "Intro." not in body and "    ## Notes" not in body
+    assert "## Description\n\nNew.\n\n## Acceptance criteria" in body
+
+
 def test_mako_headings_under_h3_or_in_fences_are_accepted(ws):
     text = "### Acceptance criteria\n\n- [ ] x\n\n```md\n## Notes\n## Description\n```\n\n~~~\n## Notes\n~~~"
     ok(ws, "new", "feature", "F", "--body", text)
