@@ -228,11 +228,12 @@ CARD_BODY = """
 
 ## Acceptance criteria
 
-- [ ]
+{criteria}
 
 ## Notes
 
 """
+EMPTY_CRITERIA = "- [ ]"
 
 # The `## ` headings Mako writes in a card body: CARD_BODY's sections, and the notes
 # _append adds (`## Released (agent-a, <date>)`). Only these end the Description section,
@@ -269,7 +270,57 @@ def check_description(text: str) -> None:
         name = heading[3:]
         kind = "a card section" if name in CARD_SECTIONS else "a heading Mako uses for notes"
         hint = (", or fill in the card's own section" if name in CARD_SECTIONS[1:] else "")
+        if name == "Acceptance criteria":
+            hint = ", or pass the criteria as acceptance_criteria (--criteria) so they fill the card's own section"
         raise MakoError(f"'{heading}' is {kind}; use ### inside the description{hint}")
+
+
+CRITERIA_HEADING = "## Acceptance criteria"
+CHECKBOX = re.compile(r"\s*[-*+] \[[ xX]\](?: |$)")
+BULLET = re.compile(r"\s*(?:[-*+]|\d+[.)])\s+")
+
+
+def criteria_lines(lines) -> str:
+    """Acceptance-criteria text as checkbox lines: existing `- [ ]`/`- [x]` lines stay as they
+    are, any other non-empty line (bulleted or not) becomes `- [ ] <text>`."""
+    out = []
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        out.append(line.lstrip() if CHECKBOX.match(line) else f"- [ ] {BULLET.sub('', line, count=1).strip()}")
+    return "\n".join(out) or EMPTY_CRITERIA
+
+
+def split_criteria(description: str) -> tuple[str, str | None]:
+    """Split a `## Acceptance criteria` section out of a description: (the description without
+    it, the criteria as checkbox lines), or (description, None) when it has none. The section
+    runs to the end of the text; any other Mako heading is still refused."""
+    found = [pos for pos, heading in mako_headings(description) if heading == CRITERIA_HEADING]
+    if not found:
+        check_description(description)
+        return description, None
+    before, section = description[:found[0]], description[found[0]:]
+    check_description(before)
+    after = section.split("\n", 1)[1] if "\n" in section else ""
+    check_description(after)
+    return before, criteria_lines(after.splitlines())
+
+
+def set_section(body: str, cid: str, name: str, text: str) -> str:
+    """body with the text under its `## <name>` heading replaced (up to the next Mako heading)."""
+    heading = f"## {name}"
+    headings = mako_headings(body)
+    starts = [i for i, (_, found) in enumerate(headings) if found == heading]
+    if not starts:
+        raise MakoError(f"{cid} has no '{heading}' section to replace; "
+                        "fix the card by hand, or use --append")
+    if starts[0] + 1 == len(headings):
+        raise MakoError(f"{cid}'s {name} section has no Mako heading after it "
+                        f"({', '.join('## ' + s for s in CARD_SECTIONS[1:])}), so "
+                        "its end is unclear; fix the card by hand, or use --append")
+    begin = body.index("\n", headings[starts[0]][0]) + 1
+    return f"{body[:begin]}\n{text}\n\n{body[headings[starts[0] + 1][0]:]}"
 
 # A spike's summary: on its branch at .mako_spikes/spike_<ID>_<slug>.md, written by Mako
 # at claim time (frontmatter filled in), the body by the agent.
@@ -734,14 +785,15 @@ class Mako:
     # operations (call through transact)
 
     def _new(self, kind: str, title: str, description: str, depends=None, human: bool = False,
-             publish_to: str | None = None) -> Card:
+             publish_to: str | None = None, criteria=None) -> Card:
         if kind not in TYPES:
             raise MakoError(f"type must be one of {', '.join(TYPES)}")
         if not title.strip():
             raise MakoError("title is required")
         if publish_to and kind != "spike":
             raise MakoError("publish_to is for spikes only")
-        check_description(description)
+        description, lifted = split_criteria(description)
+        criteria_text = criteria_lines(criteria) if criteria else lifted or EMPTY_CRITERIA
         cid = self.next_id()
         deps = self.parse_ids(depends)
         self.check_deps(cid, deps)
@@ -752,7 +804,8 @@ class Mako:
         if kind == "spike":
             meta["publish_to"] = (self.spike_publish_to if publish_to is None else publish_to).strip()
         card = Card(self.open_dir / f"{cid}.md", meta,
-                    CARD_BODY.format(title=title.strip(), description=description.strip() or "_TBD_"))
+                    CARD_BODY.format(title=title.strip(), description=description.strip() or "_TBD_",
+                                     criteria=criteria_text))
         self.save(card)
         return card
 
@@ -1059,7 +1112,8 @@ class Mako:
 
     def _edit(self, cid: str, title: str | None, kind: str | None,
               description: str | None, append: str | None,
-              depends=None, add_deps=None, remove_deps=None, human=None, publish_to=None) -> Card:
+              depends=None, add_deps=None, remove_deps=None, human=None, publish_to=None,
+              criteria=None) -> Card:
         """Change a Backlog card's title, type, body, dependencies, human marker or (spikes)
         publish_to. Holds the issue's claim lock while checking and writing, so a claim and
         an edit can't overlap. publish_to alone may also change while the spike is In Progress."""
@@ -1073,15 +1127,18 @@ class Mako:
         if publish_to is not None:
             if (kind or card.meta.get("type")) != "spike":
                 raise MakoError("publish_to is for spikes only")
-            others = (title, kind, description, append, depends, add_deps, remove_deps, human)
+            others = (title, kind, description, append, depends, add_deps, remove_deps, human, criteria)
             if card.status == "in-progress" and all(v is None for v in others):
                 card.meta["publish_to"] = publish_to.strip()
                 self.save(card)
                 return card
         if title is not None and not title.strip():
             raise MakoError("title can't be empty")
+        lifted = None
         if description is not None:
-            check_description(description)
+            description, lifted = split_criteria(description)
+        if criteria is not None:  # an explicit list wins over criteria lifted from the description
+            lifted = criteria_lines(criteria) if criteria else EMPTY_CRITERIA
         lock_dir = self.locks / cid
         try:
             lock_dir.mkdir()
@@ -1109,19 +1166,9 @@ class Mako:
                 else:
                     card.meta.pop("publish_to", None)
             if description is not None:
-                text = description.strip() or "_TBD_"
-                headings = mako_headings(card.body)
-                starts = [i for i, (_, name) in enumerate(headings) if name == "## Description"]
-                if not starts:
-                    raise MakoError(f"{cid} has no '## Description' section to replace; "
-                                    "fix the card by hand, or use --append")
-                if starts[0] + 1 == len(headings):
-                    raise MakoError(f"{cid}'s Description section has no Mako heading after it "
-                                    f"({', '.join('## ' + s for s in CARD_SECTIONS[1:])}), so "
-                                    "its end is unclear; fix the card by hand, or use --append")
-                begin = card.body.index("\n", headings[starts[0]][0]) + 1
-                end = headings[starts[0] + 1][0]
-                card.body = f"{card.body[:begin]}\n{text}\n\n{card.body[end:]}"
+                card.body = set_section(card.body, cid, "Description", description.strip() or "_TBD_")
+            if lifted is not None:
+                card.body = set_section(card.body, cid, "Acceptance criteria", lifted)
             if append is not None and append.strip():
                 card.body = card.body.rstrip("\n") + f"\n\n{append.strip()}\n"
             if depends is not None or add_deps or remove_deps:
@@ -1204,8 +1251,10 @@ class Mako:
 
     # public API
 
-    def new(self, kind, title, description="", depends=None, human=False, publish_to=None):
-        return self.transact(lambda: self._new(kind, title, description, depends, human, publish_to))
+    def new(self, kind, title, description="", depends=None, human=False, publish_to=None,
+            criteria=None):
+        return self.transact(lambda: self._new(kind, title, description, depends, human, publish_to,
+                                               criteria))
 
     def claim(self, cid, agent):
         return self.transact(lambda: self._claim(cid, agent))
@@ -1232,9 +1281,11 @@ class Mako:
         return self.transact(lambda: self._prune(ids, dry_run, discarded))
 
     def edit(self, cid, title=None, kind=None, description=None, append=None,
-             depends=None, add_deps=None, remove_deps=None, human=None, publish_to=None):
+             depends=None, add_deps=None, remove_deps=None, human=None, publish_to=None,
+             criteria=None):
         return self.transact(lambda: self._edit(cid, title, kind, description, append,
-                                                depends, add_deps, remove_deps, human, publish_to))
+                                                depends, add_deps, remove_deps, human, publish_to,
+                                                criteria))
 
     def sync(self):
         return self.transact(lambda: None)
@@ -1289,6 +1340,19 @@ def fmt_deps(m: Mako, card: Card) -> str:
     blocked = m.blockers(card)
     state = f"blocked by {', '.join(blocked)}" if blocked else "unblocked"
     return f"depends on {', '.join(deps)}: {state}"
+
+
+def cli_criteria(a) -> list[str] | None:
+    """The --criteria values plus the lines of --criteria-file, or None when neither was given."""
+    if a.criteria is None and not a.criteria_file:
+        return None
+    found = list(a.criteria or [])
+    if a.criteria_file:
+        try:
+            found += Path(a.criteria_file).read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            raise MakoError(f"can't read {a.criteria_file}: {e.strerror}") from None
+    return found
 
 
 def fmt_show(m: Mako, card: Card) -> str:
@@ -1385,7 +1449,12 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "type": {"type": "string", "enum": list(TYPES)},
          "title": {"type": "string"},
-         "description": {"type": "string"},
+         "description": {"type": "string",
+                         "description": "What and why. A '## Acceptance criteria' heading in it is "
+                                        "lifted into the card's criteria section."},
+         "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                                 "description": "One string per criterion; becomes the card's "
+                                                "Acceptance criteria checklist."},
          "depends_on": {"type": "array", "items": {"type": "string"},
                         "description": "Issues that must be Done before this one can be claimed."},
          "human": {"type": "boolean",
@@ -1403,7 +1472,12 @@ MCP_TOOLS = [
          "id": {"type": "string"},
          "title": {"type": "string"},
          "type": {"type": "string", "enum": list(TYPES)},
-         "description": {"type": "string", "description": "Replaces the card's Description section."},
+         "description": {"type": "string",
+                         "description": "Replaces the card's Description section (a '## Acceptance "
+                                        "criteria' heading in it replaces the criteria too)."},
+         "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                                 "description": "Replaces the card's Acceptance criteria checklist, "
+                                                "one string per criterion ([] resets it)."},
          "append": {"type": "string", "description": "Text added to the end of the card."},
          "depends_on": {"type": "array", "items": {"type": "string"},
                         "description": "Replaces the dependency list ([] clears it)."},
@@ -1468,11 +1542,11 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         return fmt_show(m, card)
     if name == "create_issue":
         card = m.new(args["type"], args["title"], args.get("description", ""), args.get("depends_on"),
-                     bool(args.get("human")), args.get("publish_to"))
+                     bool(args.get("human")), args.get("publish_to"), args.get("acceptance_criteria"))
         result = f"Created {card.id}: {card.title}"
     elif name == "edit_issue":
         keys = ("title", "type", "description", "append", "depends_on", "add_depends", "remove_depends",
-                "human", "publish_to")
+                "human", "publish_to", "acceptance_criteria")
         fields = [args.get(k) for k in keys]
         if all(v is None for v in fields):
             raise MakoError(f"nothing to change: pass {', '.join(keys)}")
@@ -1949,6 +2023,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="your own task: agents can't claim it, and it moves freely on the board")
     s.add_argument("--publish-to", help="spikes: folder to copy the summary into on close "
                                         "(default: spike_publish_to in config.json)")
+    s.add_argument("--criteria", action="append", metavar="TEXT",
+                   help="an acceptance criterion (repeatable)")
+    s.add_argument("--criteria-file", metavar="FILE", help="acceptance criteria, one per line")
 
     s = sub.add_parser("list", help="list issues")
     s.add_argument("--all", action="store_true", help="include Done")
@@ -1964,6 +2041,10 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--description", help="replace the Description section")
     g.add_argument("--description-file", help="read the new description from a file")
     s.add_argument("--append", help="add text to the end of the card")
+    s.add_argument("--criteria", action="append", metavar="TEXT",
+                   help="replace the Acceptance criteria with these (repeatable)")
+    s.add_argument("--criteria-file", metavar="FILE",
+                   help="replace the Acceptance criteria with the lines of a file")
     s.add_argument("--depends", help="replace the dependencies (comma-separated, '' clears)")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--human", dest="human", action="store_const", const=True, default=None,
@@ -2038,7 +2119,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         m = Mako(find_root())
         if a.cmd == "new":
-            card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human, a.publish_to)
+            card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human, a.publish_to,
+                         cli_criteria(a))
             out = f"Created {card.id}: {card.title}"
         elif a.cmd == "list":
             m.sync()
@@ -2058,11 +2140,13 @@ def main(argv: list[str] | None = None) -> int:
                     desc = Path(a.description_file).read_text(encoding="utf-8")
                 except OSError as e:
                     raise MakoError(f"can't read {a.description_file}: {e.strerror}") from None
-            if all(v is None for v in (a.title, a.type, desc, a.append, a.depends, a.human, a.publish_to)):
+            criteria = cli_criteria(a)
+            if all(v is None for v in (a.title, a.type, desc, a.append, a.depends, a.human, a.publish_to,
+                                       criteria)):
                 out = fmt_show(m, m.get(a.id))
             else:
                 card = m.edit(a.id, a.title, a.type, desc, a.append, a.depends, human=a.human,
-                              publish_to=a.publish_to)
+                              publish_to=a.publish_to, criteria=criteria)
                 out = f"Edited {card.id}: {card.title}"
         elif a.cmd == "guide":
             out = guide(m, a.agent)

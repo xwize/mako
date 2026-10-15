@@ -4,6 +4,9 @@ You run at the workspace root. Worker slots: {agents}.
 
 - Write issues with `create_issue` and refine Backlog ones with `edit_issue`; check progress
   with `list_issues`, `get_issue` and `mako status`.
+- Put what "done" means in `acceptance_criteria` (one string per criterion) on `create_issue` /
+  `edit_issue`, not in the description: they fill the card's Acceptance criteria checklist. A
+  `## Acceptance criteria` heading inside a description is lifted there too.
 - When an issue needs another one finished first, give it `depends_on` (on `create_issue`, or
   `add_depends` / `remove_depends` on `edit_issue`). It can't be claimed until those are Done.
 - For something only the user can do (e.g. set up an API key), create the issue with
