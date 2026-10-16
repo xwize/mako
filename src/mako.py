@@ -1679,6 +1679,16 @@ def serve_mcp() -> None:
 
 # --- launching -------------------------------------------------------------------
 
+def safe_title(project: str) -> str:
+    """The project name as it appears in pane titles. Anything cmd, a .bat or the wt
+    command line treats specially (& % ^ ; | < > ! quotes, backslash...) becomes "_"."""
+    return re.sub(r"[^\w .,@#+=()-]", "_", project)
+
+
+def pane_title(project: str, slot: str) -> str:
+    return f"{safe_title(project)} [{slot}]"
+
+
 def launch(m: Mako, who: str | None, resume: bool = False) -> str:
     """Open the agents in Windows Terminal. With resume, each one continues its
     latest conversation (agent.cmd ... resume -> claude -c)."""
@@ -1693,7 +1703,8 @@ def launch(m: Mako, who: str | None, resume: bool = False) -> str:
     if who != "orchestrator" and who not in m.agents:
         raise MakoError(f"unknown slot '{who}'")
     cwd = m.root if who == "orchestrator" else m.worktree(who)
-    subprocess.Popen(["wt", "-w", "0", "new-tab", "--title", who, "--suppressApplicationTitle",
+    title = pane_title(m.config["project"], who)
+    subprocess.Popen(["wt", "-w", "0", "new-tab", "--title", title, "--suppressApplicationTitle",
                       "-d", str(cwd), "cmd", "/k", str(m.dir / "agent.cmd"), who, *extra],
                      creationflags=subprocess.DETACHED_PROCESS)
     return f"{verb} a tab for {who}"
@@ -1746,7 +1757,7 @@ if "%SLOT%"=="" (
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 set "MAKO_AGENT=%SLOT%"
 set "PATH=%ROOT%\\.mako\\bin;%PATH%"
-title %SLOT%
+title {title} [%SLOT%]
 
 if /i "%SLOT%"=="orchestrator" (
   set "DIR=%ROOT%"
@@ -1792,18 +1803,20 @@ wt -w new ^
 """
 
 
-def launch_bat(agents: list[str]) -> str:
+def render_launch_bat(project: str, agents: list[str]) -> str:
     # Pane ids follow creation order: orchestrator 0, then slot k is pane k.
     # Each slot splits the pane to its left vertically; wt's --size is the share
     # the new pane takes, so pane k-1 hands over (n-k+1)/(n-k+2) of its width,
     # leaving every column 1/(n+1) of the window.
-    pane = '--title {0} --suppressApplicationTitle -d "{1}" cmd /k "%AGENT%" {0} %*'
-    cmds = ["new-tab " + pane.format("orchestrator", "%ROOT%")]
+    def pane(slot: str, cwd: str) -> str:
+        return (f'--title "{pane_title(project, slot)}" --suppressApplicationTitle '
+                f'-d "{cwd}" cmd /k "%AGENT%" {slot} %*')
+    cmds = ["new-tab " + pane("orchestrator", "%ROOT%")]
     n = len(agents)
     for k, slot in enumerate(agents, 1):
         cmds.append(f"focus-pane -t {k - 1}")
         size = (n - k + 1) / (n - k + 2)
-        cmds.append(f"split-pane -V --size {size:.3g} " + pane.format(slot, f"%WT%\\{slot}"))
+        cmds.append(f"split-pane -V --size {size:.3g} " + pane(slot, f"%WT%\\{slot}"))
     cmds.append("focus-pane -t 0")
     names = ["orchestrator", *agents]
     width = max(map(len, names)) + 2
@@ -1957,8 +1970,8 @@ class Init:
     def generate(self, project: str, agents: list[str]) -> None:
         script = self.dir / "mako.py"
         self.write(self.root / "mako.cmd", ROOT_CMD, crlf=True)
-        self.write(self.root / "mako.launch.bat", launch_bat(agents), crlf=True)
-        self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project), crlf=True)
+        self.write(self.root / "mako.launch.bat", render_launch_bat(project, agents), crlf=True)
+        self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project, title=safe_title(project)), crlf=True)
         self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
         self.write(self.dir / "bin" / "mako", BIN_SH)
         os.chmod(self.dir / "bin" / "mako", 0o755)
