@@ -158,7 +158,7 @@ The command can use `{base}`, `{branch}`, `{id}` and `{worktree}`. Its output go
 ## Reminding you to /clear
 
 A long conversation costs tokens on every turn. When a worker closes an issue that was open for
-more than `warn_after_minutes` (default 20) or reviewed more than `warn_after_reviews` times
+more than `warn_after_minutes` (default 30) or reviewed more than `warn_after_reviews` times
 (default 2), its next claim is refused once, and it asks you to run `/clear` or `/compact` in its
 pane and then ask again. It is a nudge: the retry always works, cleared or not. Set a value to `0`
 to turn that test off; both `0` means no reminders. The flag lives in `.mako/warn/<slot>`.

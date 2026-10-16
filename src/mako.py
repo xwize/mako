@@ -404,7 +404,7 @@ class Mako:
         self.spike_publish_to = str(self.config.get("spike_publish_to") or "").strip()
         # /clear nudge: closing an issue open longer than warn_after_minutes or reviewed more than
         # warn_after_reviews times makes that agent's next claim refuse once. 0 turns a test off.
-        self.warn_after_minutes = _config_int(self.config, "warn_after_minutes", 20)
+        self.warn_after_minutes = _config_int(self.config, "warn_after_minutes", 30)
         self.warn_after_reviews = _config_int(self.config, "warn_after_reviews", 2)
         self.kanban = root / "kanban"
         self.open_dir = self.kanban / "open"
@@ -1888,7 +1888,7 @@ class Init:
             config.setdefault("review_command", "")  # listed so they can be found; never changed
             config.setdefault("keep_branches", False)
             config.setdefault("spike_publish_to", "")
-            config.setdefault("warn_after_minutes", 20)
+            config.setdefault("warn_after_minutes", 30)
             config.setdefault("warn_after_reviews", 2)
             return config
         if not project:
@@ -1906,7 +1906,7 @@ class Init:
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
                 "review_command": "", "keep_branches": False, "spike_publish_to": "",
-                "warn_after_minutes": 20, "warn_after_reviews": 2}
+                "warn_after_minutes": 30, "warn_after_reviews": 2}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
         """Write only if the content changed, and log it."""

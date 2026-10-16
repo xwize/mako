@@ -19,7 +19,7 @@ def test_slow_close_refuses_next_claim_once(ws):
     ws.env["MAKO_NOW"] = "2026-01-05 09:00"
     ok(ws, "new", "feature", "One")
     ok(ws, "new", "feature", "Two")
-    finish(ws, "DEMO-0001", minutes_open=21)
+    finish(ws, "DEMO-0001", minutes_open=31)
     refusal = mcp_err(ws, "agent-a", "claim_issue", id="DEMO-0002")
     assert "/clear" in refusal and "/compact" in refusal and "ask" in refusal
     assert not (ws.root / ".mako" / "locks" / "DEMO-0002").exists()
@@ -31,7 +31,7 @@ def test_flag_is_per_agent_and_covers_claim_next_and_cli(ws):
     ws.env["MAKO_NOW"] = "2026-01-05 09:00"
     for title in ("One", "Two", "Three"):
         ok(ws, "new", "feature", title)
-    finish(ws, "DEMO-0001", minutes_open=30)
+    finish(ws, "DEMO-0001", minutes_open=31)
     assert "Claimed DEMO-0002" in mcp_ok(ws, "agent-b", "claim_next")  # agent-b unaffected
     assert mcp_err(ws, "agent-a", "claim_next")
     assert "Claimed DEMO-0003" in mcp_ok(ws, "agent-a", "claim_next")
@@ -44,7 +44,7 @@ def test_exactly_the_limit_is_quick(ws):
     ws.env["MAKO_NOW"] = "2026-01-05 09:00"
     ok(ws, "new", "feature", "One")
     ok(ws, "new", "feature", "Two")
-    finish(ws, "DEMO-0001", minutes_open=20)
+    finish(ws, "DEMO-0001", minutes_open=30)
     assert "Claimed DEMO-0002" in mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0002")
 
 
@@ -112,10 +112,10 @@ def test_cli_claim_is_refused_once(ws):
 def test_defaults_are_in_new_and_existing_configs(ws):
     path = ws.root / ".mako" / "config.json"
     config = json.loads(path.read_text(encoding="utf-8"))
-    assert (config["warn_after_minutes"], config["warn_after_reviews"]) == (20, 2)
+    assert (config["warn_after_minutes"], config["warn_after_reviews"]) == (30, 2)
     del config["warn_after_minutes"]
     config["warn_after_reviews"] = 5  # a user-set value must survive init
     path.write_text(json.dumps(config), encoding="utf-8")
     ok(ws, "init", "demo")
     config = json.loads(path.read_text(encoding="utf-8"))
-    assert (config["warn_after_minutes"], config["warn_after_reviews"]) == (20, 5)
+    assert (config["warn_after_minutes"], config["warn_after_reviews"]) == (30, 5)
