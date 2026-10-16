@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+wiki/
 
 # Throwaway test deployments of the tool
 testing/*
