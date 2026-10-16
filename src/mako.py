@@ -869,11 +869,7 @@ class Mako:
             raise MakoError(f"{agent} already holds {held['id']}; close or release it first")
         if self.warn_flag(agent).is_file():
             self.warn_flag(agent).unlink()
-            raise MakoError(
-                f"Not claimed. {agent}'s last issue was long or review-heavy, so its conversation is "
-                "probably large. Tell the user: consider running /clear (or /compact) in this pane to "
-                f"save tokens, then ask you to claim {cid} again. Re-asking is fine whether or not they "
-                "cleared; this reminder will not repeat.")
+            raise MakoError("Unclaimed. Remind the user to run /clear periodically and please try again.")
         wt = self.worktree(agent)
         if not wt.is_dir():
             raise MakoError(f"worktree for {agent} is missing: {wt}")

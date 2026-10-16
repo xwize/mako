@@ -21,7 +21,7 @@ def test_slow_close_refuses_next_claim_once(ws):
     ok(ws, "new", "feature", "Two")
     finish(ws, "DEMO-0001", minutes_open=31)
     refusal = mcp_err(ws, "agent-a", "claim_issue", id="DEMO-0002")
-    assert "/clear" in refusal and "/compact" in refusal and "ask" in refusal
+    assert "Unclaimed. Remind the user to run /clear periodically and please try again." in refusal
     assert not (ws.root / ".mako" / "locks" / "DEMO-0002").exists()
     assert "backlog" in ok(ws, "show", "DEMO-0002")
     assert "Claimed DEMO-0002" in mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0002")
