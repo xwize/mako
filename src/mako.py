@@ -55,6 +55,24 @@ def now() -> str:
     return os.environ.get("MAKO_NOW") or datetime.now().strftime("%Y-%m-%d %H:%M")  # MAKO_NOW: tests
 
 
+def _config_int(config: dict, key: str, default: int) -> int:
+    """A non-negative integer setting; missing, malformed or negative values fall back to the default."""
+    try:
+        value = int(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def minutes_between(start: str, end: str) -> float | None:
+    """Minutes from one card timestamp to another, or None if either doesn't parse."""
+    try:
+        fmt = "%Y-%m-%d %H:%M"
+        return (datetime.strptime(end, fmt) - datetime.strptime(start, fmt)).total_seconds() / 60
+    except (TypeError, ValueError):
+        return None
+
+
 def slugify(text: str, limit: int = 40) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:limit].rstrip("-") or "issue"
@@ -384,6 +402,10 @@ class Mako:
         self.keep_branches = self.config.get("keep_branches") is True
         # Pre-fills publish_to on new spikes. Empty: no default.
         self.spike_publish_to = str(self.config.get("spike_publish_to") or "").strip()
+        # /clear nudge: closing an issue open longer than warn_after_minutes or reviewed more than
+        # warn_after_reviews times makes that agent's next claim refuse once. 0 turns a test off.
+        self.warn_after_minutes = _config_int(self.config, "warn_after_minutes", 20)
+        self.warn_after_reviews = _config_int(self.config, "warn_after_reviews", 2)
         self.kanban = root / "kanban"
         self.open_dir = self.kanban / "open"
         self.closed_dir = self.kanban / "closed"
@@ -540,6 +562,19 @@ class Mako:
         return problems
 
     # locks
+
+    def warn_flag(self, agent: str) -> Path:
+        return self.dir / "warn" / agent
+
+    def _set_warn_flag(self, card: Card, agent: str) -> None:
+        """After a close: flag the agent if the issue was open too long or reviewed too often."""
+        minutes = minutes_between(card.meta.get("claimed", ""), card.meta.get("closed", ""))
+        slow = self.warn_after_minutes and minutes is not None and minutes > self.warn_after_minutes
+        reviewed = self.warn_after_reviews and review_count(card) > self.warn_after_reviews
+        if agent in self.agents and (slow or reviewed):
+            flag = self.warn_flag(agent)
+            flag.parent.mkdir(exist_ok=True)
+            flag.write_text(now(), encoding="utf-8")
 
     def read_lock(self, cid: str) -> dict | None:
         d = self.locks / cid
@@ -832,6 +867,13 @@ class Mako:
         held = self.lock_of(agent)
         if held:
             raise MakoError(f"{agent} already holds {held['id']}; close or release it first")
+        if self.warn_flag(agent).is_file():
+            self.warn_flag(agent).unlink()
+            raise MakoError(
+                f"Not claimed. {agent}'s last issue was long or review-heavy, so its conversation is "
+                "probably large. Tell the user: consider running /clear (or /compact) in this pane to "
+                f"save tokens, then ask you to claim {cid} again. Re-asking is fine whether or not they "
+                "cleared; this reminder will not repeat.")
         wt = self.worktree(agent)
         if not wt.is_dir():
             raise MakoError(f"worktree for {agent} is missing: {wt}")
@@ -956,6 +998,8 @@ class Mako:
         card.meta.update(status="done", closed=now())
         self._append(card, "Closing note", agent, note)
         self.save(card)
+        if lock:
+            self._set_warn_flag(card, lock.get("agent", ""))
         return card
 
     def _finish_summary(self, card: Card, wt: Path | None, force: bool) -> Path | None:
@@ -1844,6 +1888,8 @@ class Init:
             config.setdefault("review_command", "")  # listed so they can be found; never changed
             config.setdefault("keep_branches", False)
             config.setdefault("spike_publish_to", "")
+            config.setdefault("warn_after_minutes", 20)
+            config.setdefault("warn_after_reviews", 2)
             return config
         if not project:
             raise MakoError("usage: mako init <project_name>")
@@ -1859,7 +1905,8 @@ class Init:
         if len(set(agents)) != len(agents):
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
-                "review_command": "", "keep_branches": False, "spike_publish_to": ""}
+                "review_command": "", "keep_branches": False, "spike_publish_to": "",
+                "warn_after_minutes": 20, "warn_after_reviews": 2}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
         """Write only if the content changed, and log it."""
