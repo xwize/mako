@@ -1803,7 +1803,7 @@ wt -w new ^
 """
 
 
-def launch_bat(project: str, agents: list[str]) -> str:
+def render_launch_bat(project: str, agents: list[str]) -> str:
     # Pane ids follow creation order: orchestrator 0, then slot k is pane k.
     # Each slot splits the pane to its left vertically; wt's --size is the share
     # the new pane takes, so pane k-1 hands over (n-k+1)/(n-k+2) of its width,
@@ -1970,7 +1970,7 @@ class Init:
     def generate(self, project: str, agents: list[str]) -> None:
         script = self.dir / "mako.py"
         self.write(self.root / "mako.cmd", ROOT_CMD, crlf=True)
-        self.write(self.root / "mako.launch.bat", launch_bat(project, agents), crlf=True)
+        self.write(self.root / "mako.launch.bat", render_launch_bat(project, agents), crlf=True)
         self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project, title=safe_title(project)), crlf=True)
         self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
         self.write(self.dir / "bin" / "mako", BIN_SH)
