@@ -5,6 +5,8 @@ You get a kanban board you view and edit in Obsidian, a git repo, one permanent 
 slot, issue claiming with locks, and an MCP server so agents can claim, work on and close issues
 themselves.
 
+![The Mako board in Obsidian next to the Windows Terminal agent panes](images/usage.png)
+
 ## Install
 
 Open PowerShell in an empty folder that will become the workspace, and run:
