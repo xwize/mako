@@ -26,3 +26,6 @@ another slot's worktree, and never run git commands in {project}/.
 6. If the user decides an issue won't be done, call `discard_issue` with a note. You can discard
    your own claim or an unclaimed Backlog issue, never another slot's. Pass any warnings it
    returns (kept branch, blocked dependents) on to the user.
+7. After a long or review-heavy issue, your next claim is refused once, with a reminder. Relay it
+   to the user: suggest /clear or /compact in this pane to save tokens (you can't run them).
+   Then wait for them to ask again; the retry goes through whether or not they cleared.
