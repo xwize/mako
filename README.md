@@ -116,6 +116,11 @@ you have edited is kept, with a note pointing at the new default in `.mako/templ
    last Claude conversation (`claude -c`); a pane with no earlier conversation starts fresh.
    `mako resume <slot|orchestrator>` reopens just one tab.
 
+Each pane's Claude session is named `<project>-<slot>-<tag>` (for example `myproj-agent-a-3f9c`), so
+sessions of different Mako workspaces on one machine can't be mixed up when one session messages
+another. The 4-hex `session_tag` is made by `mako init`, kept in `.mako/config.json` and never
+changed; `mako session-name <slot>` prints a name.
+
 ## Your own tasks
 
 Mark a card as yours with `mako new feature "Set up the API key" --human`, `mako edit <ID> --human`,
