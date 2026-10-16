@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -385,6 +386,24 @@ def find_root(start: Path | None = None) -> Path:
     if (d / ".mako" / "config.json").is_file():
         return d
     raise MakoError("not inside a mako workspace (no .mako/config.json found)")
+
+
+def render_session_name(config: dict, slot: str) -> str:
+    """The Claude session name for a slot: <project>-<slot>-<tag>, e.g. mako_dev-agent-a-3f9c.
+    The only place the format lives. Claude Code names a session with `claude -n`, and
+    ListAgents / SendMessage address it by that name, so it must be unique across the
+    workspaces on a machine (the tag) and free of characters SendMessage's `to` can't take."""
+    tag = str(config.get("session_tag") or "").strip()
+    if not tag:
+        raise MakoError("this workspace has no session_tag; run `mako init` to add one")
+    project = re.sub(r"[^a-z0-9_-]", "-", str(config["project"]).lower())
+    return f"{project}-{re.sub(r'[^A-Za-z0-9_-]', '-', slot)}-{tag}"
+
+
+def new_session_tag(root: Path) -> str:
+    """4 hex chars: a hash of the workspace path plus a random salt. Generated once and kept
+    in config.json, so names stay stable across restarts and when the folder is moved."""
+    return hashlib.sha256(f"{root}{secrets.token_hex(8)}".encode()).hexdigest()[:4]
 
 
 class Mako:
@@ -1775,7 +1794,13 @@ if /i "%~2"=="resume" (
 )
 if /i "%~2"=="resume" if not defined CONTINUE echo No earlier conversation for %SLOT%; starting a new one.
 
-claude %CONTINUE% --add-dir "%ADD%" --mcp-config "%ROOT%\\.mako\\agents\\%SLOT%.mcp.json" --allowedTools mcp__mako
+rem Name the session <project>-<slot>-<tag> so other sessions can address it unambiguously.
+rem Claude drops the name on -c, so -n goes on every launch. Without a session_tag: no name.
+set "SESSION_NAME="
+for /f "usebackq delims=" %%N in (`python "%~dp0mako.py" session-name %SLOT% 2^>nul`) do set "SESSION_NAME=-n %%N"
+
+claude %CONTINUE% %SESSION_NAME% --add-dir "%ADD%" ^
+  --mcp-config "%ROOT%\\.mako\\agents\\%SLOT%.mcp.json" --allowedTools mcp__mako
 """
 
 LAUNCH_BAT = """\
@@ -1899,6 +1924,8 @@ class Init:
             config.setdefault("spike_publish_to", "")
             config.setdefault("warn_after_minutes", 30)
             config.setdefault("warn_after_reviews", 2)
+            if not config.get("session_tag"):  # backfilled once; an existing tag is never changed
+                config["session_tag"] = new_session_tag(self.root)
             return config
         if not project:
             raise MakoError("usage: mako init <project_name>")
@@ -1915,7 +1942,8 @@ class Init:
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
                 "review_command": "", "keep_branches": False, "spike_publish_to": "",
-                "warn_after_minutes": 30, "warn_after_reviews": 2}
+                "warn_after_minutes": 30, "warn_after_reviews": 2,
+                "session_tag": new_session_tag(self.root)}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
         """Write only if the content changed, and log it."""
@@ -2171,6 +2199,8 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("resume", help="like launch, but each agent continues its last conversation")
     s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
     sub.add_parser("session", help="exit 0 if Claude has a conversation to continue here (agent.cmd)")
+    s = sub.add_parser("session-name", help="print the Claude session name for a slot (agent.cmd)")
+    s.add_argument("slot", help="an agent slot or 'orchestrator'")
     sub.add_parser("mcp", help="run the MCP server on stdio")
 
     a = p.parse_args(argv)
@@ -2191,6 +2221,10 @@ def main(argv: list[str] | None = None) -> int:
             card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human, a.publish_to,
                          cli_criteria(a))
             out = f"Created {card.id}: {card.title}"
+        elif a.cmd == "session-name":
+            if a.slot != "orchestrator" and a.slot not in m.agents:
+                raise MakoError(f"unknown slot '{a.slot}' (slots: orchestrator, {', '.join(m.agents)})")
+            out = render_session_name(m.config, a.slot)
         elif a.cmd == "list":
             m.sync()
             out = fmt_issue_list(m, include_done=a.all)
