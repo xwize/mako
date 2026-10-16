@@ -43,7 +43,7 @@ TYPES = ("feature", "bug", "spike")
 COLUMNS = {"backlog": "Backlog", "in-progress": "In Progress", "done": "Done"}
 STATES = {**COLUMNS, "discarded": "Discarded"}
 FIELDS = ("id", "type", "title", "depends_on", "status", "created", "branch",
-          "claimed_by", "claimed", "merged", "closed", "discarded")
+          "claimed_by", "claimed", "merged", "closed", "discarded", "reviews")
 LIST_FIELDS = ("depends_on",)
 
 
@@ -798,7 +798,7 @@ class Mako:
         deps = self.parse_ids(depends)
         self.check_deps(cid, deps)
         meta = {"id": cid, "type": kind, "title": title.strip(), "depends_on": deps,
-                "status": "backlog", "created": now()}
+                "status": "backlog", "created": now(), "reviews": 0}
         if human:
             meta["human"] = "true"
         if kind == "spike":
@@ -1045,6 +1045,9 @@ class Mako:
             spawn_detached(cmd, wt, out)
         lock.update(reviewed=head, review_requested=now())
         (self.locks / cid / "owner.json").write_text(json.dumps(lock, indent=2), encoding="utf-8")
+        # Only reached once the tool has launched. Every round counts, a re-run on the same commit too.
+        card.meta["reviews"] = review_count(card) + 1
+        self.save(card)
         return {"id": cid, "sha": head, "log": str(log), "command": cmd}
 
     def _discard(self, cid: str, agent: str | None, note: str, force: bool) -> Card:
@@ -1355,8 +1358,18 @@ def cli_criteria(a) -> list[str] | None:
     return found
 
 
+def review_count(card: Card) -> int:
+    """Reviews held on the issue; a missing or blank field (older cards) is 0."""
+    try:
+        return max(0, int(str(card.meta.get("reviews", "")).strip() or 0))
+    except ValueError:
+        return 0
+
+
 def fmt_show(m: Mako, card: Card) -> str:
     text = card.path.read_text(encoding="utf-8")
+    if not str(card.meta.get("reviews", "")).strip():  # older card: show the implied 0
+        text = text.replace("\n---\n", "\nreviews: 0\n---\n", 1)
     if dep := fmt_deps(m, card):
         text = text.rstrip("\n") + f"\n\n({card.id} {dep})\n"
     if card.meta.get("type") == "spike":
