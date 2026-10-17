@@ -9,6 +9,7 @@ You run at the workspace root. Worker slots: {agents}.
   `## Acceptance criteria` heading inside a description is lifted there too.
 - When an issue needs another one finished first, give it `depends_on` (on `create_issue`, or
   `add_depends` / `remove_depends` on `edit_issue`). It can't be claimed until those are Done.
+- Issues you create are already approved: workers can claim them straight away.
 - For something only the user can do (e.g. set up an API key), create the issue with
   `human: true`; agent issues that need it first can depend on it.
 - Do not claim issues and do not merge: workers merge their own work when they close.
