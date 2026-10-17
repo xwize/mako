@@ -481,7 +481,7 @@ class Mako:
         # Pre-fills publish_to on new spikes. Empty: no default.
         self.spike_publish_to = str(self.config.get("spike_publish_to") or "").strip()
         # Folder (relative: from the workspace root) where close keeps a review backend's transcript.
-        # Empty: none is kept. Never under kanban/, which holds cards only.
+        # Empty: none is kept.
         self.review_transcripts_to = str(self.config.get("review_transcripts_to") or "").strip()
         # /clear nudge: closing an issue open longer than warn_after_minutes or reviewed more than
         # warn_after_reviews times makes that agent's next claim refuse once. 0 turns a test off.
@@ -1315,10 +1315,6 @@ class Mako:
         if event == "close" and result.get("transcript") and self.review_transcripts_to:
             folder = Path(self.review_transcripts_to)
             target = (folder if folder.is_absolute() else self.root / folder) / f"review_{card.id}.md"
-            if self.kanban.resolve() in target.resolve().parents:
-                self.note(f"warning: review_transcripts_to is inside kanban/, which holds cards only; "
-                          f"the review transcript of {card.id} was not kept")
-                return
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 write_atomic(target, result["transcript"])

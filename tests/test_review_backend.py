@@ -110,16 +110,6 @@ def test_close_keeps_the_transcript_in_review_transcripts_to(ws):
     assert kanban_files(ws) == ["board.md", "closed/DEMO-0001.md"]
 
 
-def test_review_transcripts_to_inside_kanban_is_refused(ws):
-    use_stub(ws)
-    set_config(ws, review_transcripts_to="kanban/closed")
-    reviewed(ws)
-    out = mcp_ok(ws, "agent-a", "close_issue", id="DEMO-0001", note="All done.")
-    assert "review_transcripts_to is inside kanban/" in out
-    assert calls(ws)[-1][0] == "finish"
-    assert kanban_files(ws) == ["board.md", "closed/DEMO-0001.md"]
-
-
 def test_release_and_discard_finish_without_a_transcript(ws):
     use_stub(ws)
     reviewed(ws)

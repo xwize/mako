@@ -234,7 +234,7 @@ How it works:
 - Gerrit never merges. Closing merges the branch as usual and abandons the change. Release and
   discard abandon the change too.
 - To keep each change's history, set `"review_transcripts_to"` in `.mako/config.json` to a
-  folder (relative to the workspace root, created if needed, never under `kanban/`). Closing then
+  folder (relative to the workspace root, created if needed). Closing then
   saves it as `<folder>/review_<ID>.md`. It's empty by default, which keeps nothing.
 - If the Gerrit is down, `request_review` says so; close, release and discard still work.
 
