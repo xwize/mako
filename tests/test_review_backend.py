@@ -76,15 +76,38 @@ def test_request_review_calls_the_backend_and_gates_close(ws):
     assert "call `request_review` first" in mcp_err(ws, "agent-a", "close_issue", id="DEMO-0001", note="x")
 
 
-def test_close_finishes_the_review_and_keeps_the_transcript(ws):
+def kanban_files(ws) -> list:
+    kanban = ws.root / "kanban"
+    return sorted(p.relative_to(kanban).as_posix() for p in kanban.rglob("*") if p.is_file())
+
+
+def test_init_lists_review_transcripts_to_and_never_changes_it(ws):
+    path = ws.root / ".mako" / "config.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["review_transcripts_to"] == ""
+    set_config(ws, review_transcripts_to="reviews")
+    ok(ws, "init")
+    assert json.loads(path.read_text(encoding="utf-8"))["review_transcripts_to"] == "reviews"
+
+
+def test_close_finishes_the_review_and_keeps_no_transcript_by_default(ws):
     use_stub(ws)
     reviewed(ws)
     out = mcp_ok(ws, "agent-a", "close_issue", id="DEMO-0001", note="All done.")
-    assert "wrote the review transcript to kanban/closed/review_DEMO-0001.md" in out
+    assert "transcript" not in out
     assert calls(ws)[-1] == ["finish", "DEMO-0001", 7, "close", "merged into main", "All done."]
-    assert (ws.root / "kanban" / "closed" / "review_DEMO-0001.md").read_text(encoding="utf-8") == \
-        "# DEMO-0001 close\n"
-    assert "DEMO-0001" in ok(ws, "list", "--all")  # the transcript is not taken for a card
+    assert kanban_files(ws) == ["board.md", "closed/DEMO-0001.md"]
+
+
+def test_close_keeps_the_transcript_in_review_transcripts_to(ws):
+    use_stub(ws)
+    set_config(ws, review_transcripts_to="notes/reviews")
+    reviewed(ws)
+    out = mcp_ok(ws, "agent-a", "close_issue", id="DEMO-0001", note="All done.")
+    target = ws.root / "notes" / "reviews" / "review_DEMO-0001.md"
+    assert f"wrote the review transcript to {target}" in out
+    assert calls(ws)[-1] == ["finish", "DEMO-0001", 7, "close", "merged into main", "All done."]
+    assert target.read_text(encoding="utf-8") == "# DEMO-0001 close\n"
+    assert kanban_files(ws) == ["board.md", "closed/DEMO-0001.md"]
 
 
 def test_release_and_discard_finish_without_a_transcript(ws):

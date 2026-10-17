@@ -231,8 +231,11 @@ How it works:
   password) and then opens the change. Use the sign-in link so your comments and votes are `human`'s.
 - When you've left comments, tell the agent. It calls `review_status` to read them, addresses
   them and asks for review again. You approve in the agent's pane by replying "approve".
-- Gerrit never merges. Closing merges the branch as usual, abandons the change and saves its
-  history to `kanban/closed/review_<ID>.md`. Release and discard abandon the change too.
+- Gerrit never merges. Closing merges the branch as usual and abandons the change. Release and
+  discard abandon the change too.
+- To keep each change's history, set `"review_transcripts_to"` in `.mako/config.json` to a
+  folder (relative to the workspace root, created if needed). Closing then
+  saves it as `<folder>/review_<ID>.md`. It's empty by default, which keeps nothing.
 - If the Gerrit is down, `request_review` says so; close, release and discard still work.
 
 The account tokens live in `.mako/review/gerrit/credentials.json`, and only Mako's tools call

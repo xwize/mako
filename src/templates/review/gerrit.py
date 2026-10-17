@@ -488,7 +488,7 @@ def status(ctx: dict, issue_id: str) -> dict:
 
 def finish(ctx: dict, issue: dict, event: str, outcome: str, note: str) -> dict:
     """After close, release or discard: abandon the change with a note (Mako did any merge; Gerrit
-    never submits). On close, return the review's transcript for Mako to keep next to the card."""
+    never submits). On close, return the review's transcript for Mako to keep (review_transcripts_to)."""
     g = _client(ctx)
     g.finish(issue["id"], f"Closed by Mako ({outcome}).\n\n{note.strip()}".strip())
     return {"transcript": g.transcript(issue["id"])} if event == "close" else {}
