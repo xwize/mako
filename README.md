@@ -27,6 +27,12 @@ Either one asks for a project name. To pass it (and other options) on the comman
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xwize/mako/main/install.ps1))) -Project myproj
 ```
 
+On Linux, pass options with `bash -s --` (or download `install.sh` and run it directly):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/xwize/mako/main/install.sh | bash -s -- --project myproj
+```
+
 `irm | iex` can't take arguments, which is why the second form exists. Neither form runs a script
 file, so the execution policy doesn't block them and you don't need to change it. Both work in
 Windows PowerShell 5.1 and PowerShell 7. On an old Windows PowerShell 5.1 that fails to download
@@ -36,43 +42,21 @@ with a TLS or "could not create SSL/TLS secure channel" error, run this first in
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'
 ```
 
-### Linux
-
-The Linux one-liner at the top asks for the project name once it is running (it reads your answer
-from the terminal, so this works under `curl | bash`). To pass options instead, use
-`bash -s --`, or download `install.sh` and run it directly:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/xwize/mako/main/install.sh | bash -s -- --project myproj
-./install.sh --project myproj
-```
-
-| Option | Meaning |
-| --- | --- |
-| `--project <name>` | Project folder and git repo name (issue ids use it as their prefix). |
-| `--prefix <LETTERS>`, `--agents a,b,c`, `--base <branch>` | Same as the PowerShell options above. |
-| `--ref <branch-or-tag>`, `--repo <url-or-path>` | Mako version and source, as above. |
-| `--upgrade` | The folder is already a workspace: install the downloaded Mako into it. |
-| `--force` | Don't ask before setting up in a folder that isn't empty. |
-| `--path` | Also install `~/.local/bin/mako`, a shim that runs the Mako of the workspace you are in. Errors cleanly outside one. Make sure `~/.local/bin` is on your PATH. |
-
-Needs **Python 3** and **git** (2.30 or newer is best); if either is missing the installer stops
-with an install hint. Optional: a terminal for the launcher (`konsole`, `gnome-terminal` or
-`tmux`) and **Claude Code** (`claude`); it warns if they're missing. No root, and no edits to your
-shell profile. Afterwards use `./mako.sh` for the CLI and `./mako.launch.sh` to start the agents.
-
 ### Options
 
+PowerShell flags are on the left, the Linux `install.sh` equivalents on the right.
+
 | Option | Meaning |
 | --- | --- |
-| `-Project <name>` | Project folder and git repo name. Issue ids use it as their prefix: `myproj` gives `MYPROJ-0001`. |
-| `-Prefix <LETTERS>` | Issue id prefix, if you want a different one. |
-| `-Agents a,b,c` | Worker slot names (default `agent-a,agent-b`). |
-| `-Base <branch>` | Base branch (default `main`). |
-| `-Ref <branch-or-tag>` | Mako version to install (default `main`). Use a release tag such as `-Ref v0.1.0` to pin. |
-| `-Repo <url-or-path>` | Where to get Mako from (default this GitHub repo). A local clone works, for testing. |
-| `-Upgrade` | The folder is already a workspace: install the downloaded Mako into it. |
-| `-Force` | Don't ask before setting up in a folder that isn't empty. |
+| `-Project <name>` / `--project <name>` | Project folder and git repo name. Issue ids use it as their prefix: `myproj` gives `MYPROJ-0001`. |
+| `-Prefix <LETTERS>` / `--prefix <LETTERS>` | Issue id prefix, if you want a different one. |
+| `-Agents a,b,c` / `--agents a,b,c` | Worker slot names (default `agent-a,agent-b`). |
+| `-Base <branch>` / `--base <branch>` | Base branch (default `main`). |
+| `-Ref <branch-or-tag>` / `--ref <branch-or-tag>` | Mako version to install (default `main`). Use a release tag such as `-Ref v0.1.0` to pin. |
+| `-Repo <url-or-path>` / `--repo <url-or-path>` | Where to get Mako from (default this GitHub repo). A local clone works, for testing. |
+| `-Upgrade` / `--upgrade` | The folder is already a workspace: install the downloaded Mako into it. |
+| `-Force` / `--force` | Don't ask before setting up in a folder that isn't empty. |
+| `--path` | Linux only. Also install `~/.local/bin/mako`, a shim that runs the Mako of the workspace you are in (it errors cleanly outside one). Put `~/.local/bin` on your PATH. |
 
 The installer installs `main` by default. There are no release tags yet. Once there are, `-Ref`
 pins to one.
@@ -84,7 +68,8 @@ pins to one.
   the Microsoft Store is only a stub. Install from [python.org](https://www.python.org/downloads/)
   and tick *Add python.exe to PATH*.
 - **git** ([Git for Windows](https://git-scm.com/download/win)).
-- Optional, needed by the launcher: **Windows Terminal** (`wt`) and **Claude Code** (`claude`). The
+- **Linux**: Python 3 and git (2.30 or newer is best), from your package manager. Optional, for the launcher: `konsole`, `gnome-terminal` or `tmux`, and **Claude Code**. No root, no shell profile edits; use `./mako.sh` and `./mako.launch.sh` afterwards.
+- Optional on Windows, needed by the launcher: **Windows Terminal** (`wt`) and **Claude Code** (`claude`). The
   installer warns if they're missing but still finishes.
 
 It needs no admin rights and doesn't touch your global PATH. The `mako` shims are put on PATH only
