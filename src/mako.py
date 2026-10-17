@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -37,6 +38,7 @@ import sys
 import time
 from contextlib import contextmanager, suppress
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 VERSION = "0.1.0"
@@ -54,6 +56,27 @@ class MakoError(Exception):
 
 def now() -> str:
     return os.environ.get("MAKO_NOW") or datetime.now().strftime("%Y-%m-%d %H:%M")  # MAKO_NOW: tests
+
+
+# The Gerrit review backend's default URL. Not localhost: on Windows that tries IPv6 first, ~2 s a call.
+GERRIT_URL = "http://127.0.0.1:8080"
+
+
+@lru_cache(maxsize=None)
+def gerrit_module():
+    """The Gerrit client, templates/gerrit/gerrit.py next to this file. It is shipped data, like the
+    prompts, so mako.py stays one file; it is only loaded when the review backend is Gerrit."""
+    path = Path(__file__).resolve().parent / "templates" / "gerrit" / "gerrit.py"
+    if not path.is_file():
+        raise MakoError(f"{path} is missing; run `mako init` to restore it")
+    spec = importlib.util.spec_from_file_location("mako_gerrit", path)
+    module = importlib.util.module_from_spec(spec)
+    was, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # no __pycache__ in .mako/templates
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = was
+    return module
 
 
 def _config_int(config: dict, key: str, default: int) -> int:
@@ -440,6 +463,12 @@ class Mako:
         self.agents = list(self.config.get("agents", []))
         # Empty means no review step: no request_review, no gate on close_issue.
         self.review_command = str(self.config.get("review_command") or "").strip()
+        # "review": {"backend": "gerrit", "url": .., "project": ..} reviews in a Gerrit the user runs
+        # (it wins over review_command). Without it, nothing here ever contacts a Gerrit.
+        review = self.config.get("review") if isinstance(self.config.get("review"), dict) else {}
+        self.review_backend = str(review.get("backend") or "").strip().lower()
+        self.gerrit_url = str(review.get("url") or GERRIT_URL).strip()
+        self.gerrit_project = str(review.get("project") or self.config["project"]).strip()
         # On: close keeps the merged branch and names it in the merge commit. Off: it's deleted.
         self.keep_branches = self.config.get("keep_branches") is True
         # Pre-fills publish_to on new spikes. Empty: no default.
@@ -460,6 +489,16 @@ class Mako:
         self.settings: str | None = None
         for d in (*self.card_dirs, self.locks):
             d.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def reviewing(self) -> bool:
+        """Is there a review step (request_review, and its gate on close_issue)?"""
+        return bool(self.review_command or self.review_backend)
+
+    @property
+    def review_has_status(self) -> bool:
+        """Can the backend report votes and comments (review_status)?"""
+        return self.review_backend == "gerrit"
 
     # ids & paths
 
@@ -1029,7 +1068,7 @@ class Mako:
         """Finish an issue. If its branch has commits they are merged into the
         base branch first; the branch must already contain the base branch, so
         conflicts are resolved by the worker in its own worktree, never here.
-        With gate (the agents' close_issue) and a review_command configured, the
+        With gate (the agents' close_issue) and a review step configured, the
         branch's HEAD must be the commit the last request_review covered.
         Spikes never merge: their result is the closing note, and a branch with
         commits is kept as it is (no review gate, no behind-base check)."""
@@ -1051,7 +1090,7 @@ class Mako:
         if spike:
             published = self._finish_summary(card, wt if wt and current_branch(wt) == branch else None, force)
         pending = unmerged_commits(self.project, branch, self.base)
-        if gate and self.review_command and lock and pending and not force and not spike:
+        if gate and self.reviewing and lock and pending and not force and not spike:
             head = git(self.project, "rev-parse", branch)
             if lock.get("reviewed") != head:
                 raise MakoError(f"call `request_review` first (no review for {head[:7]})")
@@ -1077,6 +1116,9 @@ class Mako:
         card.meta.update(status="done", closed=now())
         self._append(card, "Closing note", agent, note)
         self.save(card)
+        merged = pending and not spike
+        self._gerrit_finish(card, lock, f"merged into {card.meta.get('merge_to') or self.base}" if merged
+                            else "closed without merging", note, transcript=True)
         if lock:
             self._set_warn_flag(card, lock.get("agent", ""))
         return card
@@ -1156,13 +1198,16 @@ class Mako:
         card.meta.update(status="backlog", claimed_by="", claimed="")
         self._append(card, "Released", agent, note)
         self.save(card)
+        self._gerrit_finish(card, lock, "released, back in the Backlog", note)
         return card
 
     def _review(self, cid: str, agent: str | None) -> dict:
-        """Launch review_command for a claimed issue, detached, and record the
-        commit it covers on the claim (cleared with the claim on close/release)."""
-        if not self.review_command:
-            raise MakoError('no review step: set "review_command" in .mako/config.json')
+        """Launch review_command for a claimed issue, detached (or with the Gerrit backend,
+        upload it as a new patch set), and record the commit it covers on the claim (cleared
+        with the claim on close/release)."""
+        if not self.reviewing:
+            raise MakoError('no review step: set "review_command" or "review" in .mako/config.json')
+        self._check_backend()
         card = self.get(cid)
         cid = card.id
         lock = self.read_lock(cid)
@@ -1177,21 +1222,102 @@ class Mako:
             raise MakoError(f"{lock.get('agent')}'s worktree has uncommitted changes; "
                             "commit them first, the review covers commits")
         head = git(self.project, "rev-parse", branch)
-        cmd = self.review_command
-        for key, value in {"base": self.base, "branch": branch, "id": cid, "worktree": str(wt)}.items():
-            cmd = cmd.replace("{" + key + "}", value)
-        log = self.dir / "logs" / f"{cid}.review.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with open(log, "w", encoding="utf-8") as out:
-            out.write(f"# {now()}  {cid} at {head}\n# cwd: {wt}\n$ {cmd}\n")
-            out.flush()
-            spawn_detached(cmd, wt, out)
+        if self.review_backend == "gerrit":
+            info = self._gerrit_upload(card, lock.get("agent", ""), branch)
+            lock["gerrit_change"] = info["change"]
+        else:
+            cmd = self.review_command
+            for key, value in {"base": self.base, "branch": branch, "id": cid, "worktree": str(wt)}.items():
+                cmd = cmd.replace("{" + key + "}", value)
+            log = self.dir / "logs" / f"{cid}.review.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "w", encoding="utf-8") as out:
+                out.write(f"# {now()}  {cid} at {head}\n# cwd: {wt}\n$ {cmd}\n")
+                out.flush()
+                spawn_detached(cmd, wt, out)
+            info = {"log": str(log), "command": cmd}
         lock.update(reviewed=head, review_requested=now())
         (self.locks / cid / "owner.json").write_text(json.dumps(lock, indent=2), encoding="utf-8")
         # Only reached once the tool has launched. Every round counts, a re-run on the same commit too.
         card.meta["reviews"] = review_count(card) + 1
         self.save(card)
-        return {"id": cid, "sha": head, "log": str(log), "command": cmd}
+        return {"id": cid, "sha": head, **info}
+
+    # Gerrit review backend: the client (templates/gerrit/gerrit.py) speaks Gerrit's HTTP API and
+    # holds the accounts' tokens in .mako/gerrit/; Mako makes every call, agents never do.
+
+    def _check_backend(self) -> None:
+        if self.review_backend not in ("", "gerrit"):
+            raise MakoError(f"unknown review backend '{self.review_backend}' in .mako/config.json; "
+                            'the only one is "gerrit" (or leave "review" out and use review_command)')
+
+    def gerrit(self):
+        if self.review_backend != "gerrit":
+            raise MakoError('the review backend is not Gerrit: set "review": {"backend": "gerrit"} '
+                            "in .mako/config.json")
+        return gerrit_module().Gerrit(self.gerrit_url, self.dir / "gerrit", self.gerrit_project,
+                                      f"mako-{self.config.get('session_tag') or self.prefix.lower()}")
+
+    @contextmanager
+    def gerrit_errors(self):
+        """Gerrit failures as MakoErrors; an unreachable Gerrit says what to do about it."""
+        client = gerrit_module()
+        try:
+            yield
+        except client.Unreachable:
+            raise MakoError(f"Gerrit not reachable at {self.gerrit_url}; start it (e.g. trayit) or switch "
+                            "the review backend in .mako/config.json") from None
+        except client.GerritError as e:
+            raise MakoError(f"Gerrit: {e}") from None
+
+    def gerrit_setup(self) -> list[str]:
+        """Accounts for `human` and every slot, the project and the base branch. Idempotent."""
+        g = self.gerrit()
+        with self.gerrit_errors():
+            return g.setup(["human", *self.agents], self.project, self.base)
+
+    def _gerrit_upload(self, card: Card, agent: str, branch: str) -> dict:
+        """Push the issue as a new patch set of its change, as the slot's account (setting Gerrit
+        up first if it isn't yet)."""
+        g = self.gerrit()
+        people = ["human", *self.agents]
+        try:
+            with self.gerrit_errors():
+                if not g.ready(people):
+                    g.setup(people, self.project, self.base)
+                pushed = g.push(self.project, card.id, agent, branch, self.base, card.title)
+        except MakoError as e:
+            raise MakoError(f"{e}. No review was recorded; call request_review again once that is fixed") from None
+        return {**pushed, "url": g.change_url(pushed["change"]), "sign_in": g.sign_in_url(pushed["change"])}
+
+    def _gerrit_finish(self, card: Card, lock: dict | None, outcome: str, note: str,
+                       transcript: bool = False) -> None:
+        """After close, release or discard of an issue that went to Gerrit: abandon its change with
+        a note (Mako did any merge; Gerrit never submits) and, on close, write the review transcript
+        next to the closed card. Never fails the command: a Gerrit that is down costs a warning."""
+        if self.review_backend != "gerrit" or not lock or not lock.get("gerrit_change"):
+            return
+        try:
+            g = self.gerrit()
+            with self.gerrit_errors():
+                g.finish(card.id, f"Closed by Mako ({outcome}).\n\n{note.strip()}".strip())
+                if transcript:
+                    target = self.closed_dir / f"review_{card.id}.md"  # not <PREFIX>-*.md: not a card
+                    write_atomic(target, g.transcript(card.id))
+                    self.note(f"wrote the review transcript to kanban/closed/{target.name}")
+        except MakoError as e:
+            self.note(f"warning: {e}. Change {lock['gerrit_change']} was left as it is in Gerrit"
+                      + (" and no review transcript was written" if transcript else ""))
+
+    def review_status(self, cid: str) -> dict:
+        """The issue's Gerrit change: state, patch set, votes, messages and inline comments."""
+        if not self.review_has_status:
+            raise MakoError("review_status needs the Gerrit review backend "
+                            '("review": {"backend": "gerrit"} in .mako/config.json)')
+        card = self.get(cid)
+        g = self.gerrit()
+        with self.gerrit_errors():
+            return g.status(card.id)
 
     def _discard(self, cid: str, agent: str | None, note: str, force: bool) -> Card:
         """Drop an issue without merging: the card moves to kanban/discarded/ and
@@ -1226,6 +1352,7 @@ class Mako:
         card.meta.update(status="discarded", discarded=now(), claimed_by="", claimed="")
         self._append(card, "Discarded", agent, note)
         self.save(card)
+        self._gerrit_finish(card, lock, "discarded, not merged", note)
         if branch and branch_exists(self.project, branch):
             head = (f"{cid} was in progress ({owner})." if was == "in-progress"
                     else f"{cid} still had a branch from an earlier claim.")
@@ -1551,6 +1678,14 @@ def fmt_claim(info: dict) -> str:
             f"  card:     {info['card']}{summary}")
 
 
+def fmt_gerrit_upload(info: dict) -> str:
+    what = (f"patch set {info['patch_set']}" if info["new"]
+            else f"nothing new (Gerrit already has this commit as patch set {info['patch_set']})")
+    return (f"Uploaded {info['id']} ({info['sha'][:7]}) to Gerrit: change {info['change']}, {what}.\n"
+            f"  change:  {info['url']}\n"
+            f"  sign in: {info['sign_in']}  (opens the change as `human`, no login screen)")
+
+
 def fmt_close(m: Mako, card: Card) -> str:
     if card.meta.get("type") == "spike":
         branch = card.meta.get("branch")
@@ -1580,16 +1715,22 @@ def fmt_slots(m: Mako) -> str:
 # Everything agents are told lives in .mako/prompts/*.txt (shipped as templates/prompts/)
 # so users can edit it. The guide is common + worker or orchestrator (+ review) + cli.
 
+REVIEW_CLI_GERRIT = ("`mako review <ID>` (upload to Gerrit again), `mako review <ID> --status`, "
+                     "`mako review setup` (Gerrit accounts and project),\n")
+
+
 def guide(m: Mako, agent: str | None) -> str:
     values = {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
               "agent": agent, "agents": ", ".join(m.agents),
               "worktree": m.worktree(agent) if agent else "",
-              # Review text appears only when review_command is set; otherwise the guide is as before.
-              "review_cli": "`mako review <ID>` (reopen the review tool),\n" if m.review_command else ""}
+              # Review text appears only with a review step; otherwise the guide is as before.
+              "review_cli": REVIEW_CLI_GERRIT if m.review_has_status
+              else "`mako review <ID>` (reopen the review tool),\n" if m.reviewing else ""}
     if agent not in m.agents:
         names = ["common", "orchestrator", "cli"]
     else:
-        names = ["common", "worker", *(["review"] if m.review_command else []), "cli"]
+        names = ["common", "worker", *(["review"] if m.reviewing else []),
+                 *(["review-gerrit"] if m.review_has_status else []), "cli"]
     return "\n\n".join(prompt(m, n, values) for n in names) + "\n"
 
 
@@ -1625,8 +1766,9 @@ def approval_note(card: Card) -> str:
     return " (not approved yet: the user must set `approved: true` on the card before anyone can claim it)"
 
 
-def mcp_tools(review: bool, worker: bool) -> list[dict]:
-    tools = [t for t in MCP_TOOLS if review or t["name"] != "request_review"]
+def mcp_tools(review: bool, worker: bool, status: bool = False) -> list[dict]:
+    tools = [t for t in MCP_TOOLS if (review or t["name"] != "request_review")
+             and (status or t["name"] != "review_status")]
     role = "worker" if worker else "orchestrator"
     return [{**t, "description": CREATE_ISSUE_HELP[role]} if t["name"] == "create_issue" else t
             for t in tools]
@@ -1713,9 +1855,15 @@ MCP_TOOLS = [
          "note": {"type": "string", "description": "Why, and how far you got."}},
          "required": ["id"]}},
     {"name": "request_review",
-     "description": "Open the configured review tool on your claimed issue's branch for the user, "
-                    "and record the commit it covers. Commit first. Then end your turn and wait for "
-                    "the user to approve or send comments.",
+     "description": "Open the configured review tool on your claimed issue's branch for the user "
+                    "(with Gerrit: upload it as a new patch set of the issue's change), and record the "
+                    "commit it covers. Commit first. Then end your turn and wait for the user to approve "
+                    "or send comments.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "review_status",
+     "description": "The issue's review in Gerrit as JSON: state (pending, changes_requested, approved, "
+                    "merged, abandoned), owner, latest patch set, votes, messages and inline comments, "
+                    "each with the patch set it is on. Call it after the user says they have reviewed.",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     {"name": "discard_issue",
      "description": "Drop an issue that won't be done: moves the card to kanban/discarded and off the board "
@@ -1769,9 +1917,16 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         result = fmt_close(m, m.close(args["id"], agent, args.get("note", ""), gate=True))
     elif name == "request_review":
         info = m.review(args["id"], agent)
-        result = (f"Review opened for {info['id']} ({info['sha'][:7]}). End your turn and wait. "
-                  'The user will reply "approve" or send comments; on comments, fix them, re-run the '
-                  f"tests, commit and call request_review again. Log: {info['log']}")
+        if "change" in info:
+            result = (f"{fmt_gerrit_upload(info)}\nGive the user both links. End your turn and wait. "
+                      'The user will reply "approve" or say they have reviewed; then call review_status, '
+                      "address each comment, re-run the tests, commit and call request_review again.")
+        else:
+            result = (f"Review opened for {info['id']} ({info['sha'][:7]}). End your turn and wait. "
+                      'The user will reply "approve" or send comments; on comments, fix them, re-run the '
+                      f"tests, commit and call request_review again. Log: {info['log']}")
+    elif name == "review_status":
+        result = json.dumps(m.review_status(args["id"]), indent=2)
     elif name == "release_issue":
         card = m.release(args["id"], agent, args.get("note", ""))
         result = f"Released {card.id} back to the Backlog."
@@ -1815,7 +1970,7 @@ def serve_mcp() -> None:
         elif method == "tools/list":
             m = Mako(root)
             # Read per call: config.json may change.
-            result = {"tools": mcp_tools(bool(m.review_command), agent in m.agents)}
+            result = {"tools": mcp_tools(m.reviewing, agent in m.agents, m.review_has_status)}
         elif method == "tools/call":
             try:
                 text, is_error = mcp_call(params.get("name"), params.get("arguments") or {}, agent), False
@@ -2363,8 +2518,10 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--force", action="store_true", help="act on another slot's claim")
         s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
-    s = sub.add_parser("review", help="open the review_command from config.json on a claimed issue")
-    s.add_argument("id")
+    s = sub.add_parser("review", help="open the review step on a claimed issue (review_command, or upload "
+                       "to Gerrit); `mako review setup` sets Gerrit up")
+    s.add_argument("id", help="the issue, or `setup` for the Gerrit accounts, project and base branch")
+    s.add_argument("--status", action="store_true", help="print the issue's Gerrit review as JSON")
     s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
     s = sub.add_parser("discard", help="drop an issue without merging (kanban/discarded, branch kept)")
@@ -2455,9 +2612,17 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "release":
             card = m.release(a.id, a.agent, a.note, a.force)
             out = f"Released {card.id}"
+        elif a.cmd == "review" and a.id == "setup":
+            done = m.gerrit_setup()
+            out = (f"Gerrit at {m.gerrit_url} is set up for project {m.gerrit_project}"
+                   f"{': made ' + ', '.join(done) if done else ' (nothing new)'}.\n"
+                   f"  accounts: admin, human, {', '.join(m.agents)} (tokens in .mako/gerrit/credentials.json)")
+        elif a.cmd == "review" and a.status:
+            out = json.dumps(m.review_status(a.id), indent=2)
         elif a.cmd == "review":
             info = m.review(a.id, a.agent)
-            out = f"Opened the review for {info['id']} ({info['sha'][:7]}): {info['command']}\n  log: {info['log']}"
+            out = (fmt_gerrit_upload(info) if "change" in info else
+                   f"Opened the review for {info['id']} ({info['sha'][:7]}): {info['command']}\n  log: {info['log']}")
         elif a.cmd == "discard":
             card = m.discard(a.id, a.agent, a.note, a.force)
             out = f"Discarded {card.id}: moved to kanban/discarded, nothing merged."

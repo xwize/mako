@@ -1,0 +1,13 @@
+### Reviews happen in Gerrit
+
+Each issue is one Gerrit change (topic = the issue id), owned by your slot's account. Every
+`request_review` uploads your branch, squashed, as a new patch set of that change; your own
+commits are left as they are. Its reply has the change URL and a sign-in link: pass both to the user.
+
+- When the user says they have reviewed, call `review_status`. Read the votes, the messages and
+  every inline comment (each says which patch set it is on). Address each one, re-run the tests,
+  commit and call `request_review` again.
+- The user still approves in chat ("approve"), as above.
+- Never contact Gerrit yourself (no curl, no git push or fetch to it, no reading `.mako/gerrit/`).
+  Mako's tools hold the accounts and make the calls. If a call says Gerrit is not reachable, tell
+  the user and retry when they say it is up.

@@ -192,6 +192,57 @@ have been reviewed. Leave it empty (`""`, the default) to turn review off.
 The command can use `{base}`, `{branch}`, `{id}` and `{worktree}`. Its output goes to
 `.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it.
 
+### Reviewing in Gerrit (optional)
+
+Instead of a review command, Mako can send each issue to a [Gerrit](https://www.gerritcodereview.com/)
+you run yourself. You get patch sets, inline comments and votes, and agents read your comments
+themselves instead of you pasting them. Add a `review` block to `.mako/config.json` (it wins over
+`review_command`):
+
+```json
+"review": {"backend": "gerrit", "url": "http://127.0.0.1:8080", "project": "demo"}
+```
+
+`url` defaults to `http://127.0.0.1:8080` and `project` to the workspace's project name. Use
+`127.0.0.1` rather than `localhost`: on Windows, `localhost` costs about 2 seconds a call.
+
+**You supply the Gerrit; Mako doesn't start, stop or install anything.** The reference setup is
+trayit, a tray tool that runs the official `gerritcodereview/gerrit` image in Docker under WSL
+on port 8080. Any Gerrit will do if it is:
+
+- **in dev-auth mode** (`DEVELOPMENT_BECOME_ANY_ACCOUNT`, the official image's default). Mako
+  creates its accounts by signing in as them, with no passwords to set up; setup refuses any
+  other mode.
+- **reachable only from your machine.** Dev auth lets anyone who can reach the port act as any
+  account, administrator included, so bind it to `127.0.0.1` and never expose it on a network.
+
+How it works:
+
+- `mako review setup` checks the Gerrit and creates the project and the accounts: `human` (you,
+  an administrator) and one per agent slot, each with a `<name>@mako.example.com` email. It also
+  pushes the base branch. You can re-run it at any time. The first `request_review` runs it if
+  needed, and if the Gerrit was reset (trayit wipes its data when it restarts), Mako sets it up
+  again on the next call.
+- Each issue is one change, with the issue id as its topic, owned by the slot that requested the
+  review. `request_review` squashes the branch into one commit and uploads it as the next patch
+  set; an unchanged branch adds nothing. The agent's own commits are not rewritten and no
+  commit-msg hook is installed. The reply has the change's URL and a sign-in link that opens it
+  as `human` without a login screen.
+- Once you've reviewed, tell the agent. It calls `review_status` (votes, messages and inline
+  comments, each with its patch set), addresses them and asks again. `mako review <ID> --status`
+  prints the same JSON. You still approve in the agent's pane by replying "approve".
+- Gerrit never merges. Closing an issue merges it as usual, then abandons the change with a
+  note and writes the review's history to `kanban/closed/review_<ID>.md`, next to the card.
+  Release and discard abandon the change too. The change and its comments stay readable in Gerrit.
+- If the Gerrit is down, `request_review` fails with a message saying so and records nothing:
+  start the Gerrit and ask again. Close, release and discard still work and give a warning.
+
+Tokens for the accounts are in `.mako/gerrit/credentials.json`, readable only by you on Linux and
+macOS. Mako's own tools make every Gerrit call, and agents are told not to contact Gerrit
+themselves. Per-slot accounts give *attribution*, not *enforcement*: an agent that read that file
+could act as any account. Several workspaces can share one Gerrit: each gets its own project and
+its own tokens on the shared accounts.
+
 ## Reminding you to /clear
 
 A long conversation costs tokens on every turn. When a worker closes an issue that was open for
