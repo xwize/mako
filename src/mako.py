@@ -1804,12 +1804,18 @@ def pane_title(project: str, slot: str) -> str:
 
 
 def launch(m: Mako, who: str | None, resume: bool = False) -> str:
-    """Open the agents in Windows Terminal. With resume, each one continues its
-    latest conversation (agent.cmd ... resume -> claude -c)."""
-    if os.name != "nt":
-        raise MakoError("launch currently supports Windows Terminal only")
+    """Open the agents in Windows Terminal (Linux: mako.launch.sh). With resume, each one
+    continues its latest conversation (agent.cmd ... resume -> claude -c)."""
     extra = ["resume"] if resume else []
     verb = "Resumed" if resume else "Opened"
+    if os.name != "nt":
+        if who is not None:
+            raise MakoError("launching a single slot is not supported on Linux yet; "
+                            "run mako.launch.sh to open them all")
+        subprocess.Popen(["bash", str(m.root / "mako.launch.sh"), *extra], cwd=m.root,
+                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return f"{verb} a terminal with all agents"
     if who is None:
         subprocess.Popen(["cmd", "/c", str(m.root / "mako.launch.bat"), *extra], cwd=m.root,
                          creationflags=subprocess.DETACHED_PROCESS)
@@ -1852,8 +1858,13 @@ ROOT_CMD = '@python "%~dp0.mako\\mako.py" %*\n'
 BIN_CMD = '@python "%~dp0..\\mako.py" %*\n'
 BIN_SH = """\
 #!/bin/sh
-# POSIX shim so `mako` works from Git Bash (Claude Code's shell and `!` commands).
-exec python "$(dirname "$0")/../mako.py" "$@"
+# POSIX shim so `mako` works from Git Bash (Claude Code's shell and `!` commands) and on Linux.
+exec "$(command -v python3 || command -v python)" "$(dirname "$(readlink -f "$0")")/../mako.py" "$@"
+"""
+# Not named `mako`: that is a valid project name, and the project folder would clash.
+ROOT_SH = """\
+#!/bin/sh
+exec "$(command -v python3 || command -v python)" "$(dirname "$(readlink -f "$0")")/.mako/mako.py" "$@"
 """
 
 AGENT_CMD = """\
@@ -2009,7 +2020,7 @@ class Init:
         Mako(self.root).sync()  # renders kanban/board.md from the cards
         self.log.append(f"\nMako workspace ready: {self.root}\n"
                         f"  Open this folder as an Obsidian vault to see kanban/board.md.\n"
-                        f"  Run mako.launch.bat to start the orchestrator and {', '.join(agents) or 'no slots'}.\n"
+                        f"  Run {'mako.launch.bat' if os.name == 'nt' else './mako.launch.sh'} to start the orchestrator and {', '.join(agents) or 'no slots'}.\n"
                         f"  Later, `mako resume` reopens them, each continuing its last conversation.")
         return "\n".join(self.log)
 
@@ -2111,6 +2122,15 @@ class Init:
         self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
         self.write(self.dir / "bin" / "mako", BIN_SH)
         os.chmod(self.dir / "bin" / "mako", 0o755)
+        # The Linux files are always written too, so a workspace works from either OS with no re-init.
+        self.write(self.root / "mako.sh", ROOT_SH)
+        os.chmod(self.root / "mako.sh", 0o755)
+        posix = Path(__file__).resolve().parent / "templates" / "posix"
+        for name, dst in (("mako.launch.sh", self.root), ("agent.sh", self.dir)):
+            if (posix / name).is_file():
+                # LF only: a Windows checkout with autocrlf gives these CRLF, and bash then fails on every line.
+                self.write(dst / name, (posix / name).read_bytes().replace(b"\r\n", b"\n"))
+                os.chmod(dst / name, 0o755)
 
     def prompts(self) -> None:
         """Install the default .mako/prompts/*.txt. These are the user's to edit, so an
@@ -2304,7 +2324,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--dry-run", action="store_true", help="list what would be deleted")
     s.add_argument("--discarded", action="store_true",
                    help="also delete discarded issues' branches (unmerged work is lost)")
-    s = sub.add_parser("launch", help="open Windows Terminal with the agents")
+    s = sub.add_parser("launch", help="open the agents in a terminal (Windows Terminal, or Konsole on Linux)")
     s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
     s = sub.add_parser("resume", help="like launch, but each agent continues its last conversation")
     s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
