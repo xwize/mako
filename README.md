@@ -203,8 +203,7 @@ themselves instead of you pasting them. Add a `review` block to `.mako/config.js
 "review": {"backend": "gerrit", "url": "http://127.0.0.1:8080", "project": "demo"}
 ```
 
-`url` defaults to `http://127.0.0.1:8080` and `project` to the workspace's project name. Use
-`127.0.0.1` rather than `localhost`: on Windows, `localhost` costs about 2 seconds a call.
+`url` defaults to `http://127.0.0.1:8080` and `project` to the workspace's project name.
 
 Mako itself knows nothing about Gerrit. `"backend": "gerrit"` loads
 `.mako/templates/review/gerrit.py`, and Mako calls its hooks: `setup`, `request` (for
@@ -223,30 +222,22 @@ on port 8080. Any Gerrit will do if it is:
 
 How it works:
 
-- `mako review setup` checks the Gerrit and creates the project and the accounts: `human` (you,
-  an administrator) and one per agent slot, each with a `<name>@mako.example.com` email. It also
-  pushes the base branch. You can re-run it at any time. The first `request_review` runs it if
-  needed, and if the Gerrit was reset (trayit wipes its data when it restarts), Mako sets it up
-  again on the next call.
-- Each issue is one change, with the issue id as its topic, owned by the slot that requested the
-  review. `request_review` squashes the branch into one commit and uploads it as the next patch
-  set; an unchanged branch adds nothing. The agent's own commits are not rewritten and no
-  commit-msg hook is installed. The reply has the change's URL and a sign-in link that opens it
-  as `human` without a login screen.
-- Once you've reviewed, tell the agent. It calls `review_status` (votes, messages and inline
-  comments, each with its patch set), addresses them and asks again. `mako review <ID> --status`
-  prints the same JSON. You still approve in the agent's pane by replying "approve".
-- Gerrit never merges. Closing an issue merges it as usual, then abandons the change with a
-  note and writes the review's history to `kanban/closed/review_<ID>.md`, next to the card.
-  Release and discard abandon the change too. The change and its comments stay readable in Gerrit.
-- If the Gerrit is down, `request_review` fails with a message saying so and records nothing:
-  start the Gerrit and ask again. Close, release and discard still work and give a warning.
+- `mako review setup` creates the project, pushes the base branch and adds the accounts: `human`
+  (you, an administrator) and one per agent slot. It is safe to re-run, and `request_review` runs
+  it for you when needed, including after the Gerrit has been reset.
+- Each issue is one change. Every `request_review` uploads the branch, squashed, as a new patch
+  set. The reply gives two links: the change itself, which opens as whoever your browser is
+  already signed in as, and a sign-in link, which uses dev auth to sign you in as `human` (no
+  password) and then opens the change. Use the sign-in link so your comments and votes are `human`'s.
+- When you've left comments, tell the agent. It calls `review_status` to read them, addresses
+  them and asks for review again. You approve in the agent's pane by replying "approve".
+- Gerrit never merges. Closing merges the branch as usual, abandons the change and saves its
+  history to `kanban/closed/review_<ID>.md`. Release and discard abandon the change too.
+- If the Gerrit is down, `request_review` says so; close, release and discard still work.
 
-Tokens for the accounts are in `.mako/review/gerrit/credentials.json`, readable only by you on
-Linux and macOS. Mako's own tools make every Gerrit call, and agents are told not to contact Gerrit
-themselves. Per-slot accounts give *attribution*, not *enforcement*: an agent that read that file
-could act as any account. Several workspaces can share one Gerrit: each gets its own project and
-its own tokens on the shared accounts.
+The account tokens live in `.mako/review/gerrit/credentials.json`, and only Mako's tools call
+Gerrit. Per-slot accounts give *attribution*, not *enforcement*: an agent that read that file could
+act as any account.
 
 ## Reminding you to /clear
 
