@@ -17,3 +17,6 @@ This workspace uses Mako: a kanban board plus fixed agent slots, each with its o
 - Cards marked `human: true` (`[human]` in `list_issues`) are the user's own tasks. Agents can't
   claim, close or release them; the user moves them on the board. An issue that depends on one
   unblocks when the user moves it to Done.
+- Cards a worker slot creates start with `approved: false` (`[unapproved]` in `list_issues`), and
+  nobody can claim them until the user sets `approved: true`. Cards the orchestrator or the user
+  create are approved from the start.

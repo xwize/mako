@@ -211,8 +211,9 @@ class Card:
 
     @property
     def approved(self) -> bool:
-        """Frontmatter `approved`: cards an agent created stay unapproved (`false`) until the user
-        ticks it; a card without the field (older, or made by the user) counts as approved."""
+        """Frontmatter `approved`: cards a worker slot created stay unapproved (`false`) until the
+        user ticks it. Cards from the orchestrator or the user are `true`, and a card without the
+        field (older) counts as approved."""
         return str(self.meta.get("approved", "")).strip().lower() not in ("false", "no", "0")
 
     def render(self) -> str:
@@ -928,7 +929,7 @@ class Mako:
         if card.human:
             raise MakoError(f"{cid} is a human task (human: true); agents can't claim it")
         if not card.approved:
-            raise MakoError(f"{cid} is not approved: it was created by an agent. "
+            raise MakoError(f"{cid} is not approved: it was created by a worker slot. "
                             "The user approves it by setting `approved: true` in the card's properties.")
         if card.status in ("done", "discarded"):
             raise MakoError(f"{cid} is {'closed' if card.status == 'done' else 'discarded'}; reopen it first")
@@ -1607,6 +1608,30 @@ def prompt(m: Mako, name: str, values: dict) -> str:
     return text
 
 
+# create_issue's description, per role: who needs the user's approval is the part agents misread.
+CREATE_ISSUE_HELP = {
+    "orchestrator": "Create a new issue in the Backlog. You are the orchestrator, so issues you create are "
+                    "already approved and can be claimed straight away. Only issues created by a worker "
+                    "slot start unapproved, until the user sets `approved: true` on the card.",
+    "worker": "Create a new issue in the Backlog. You are a worker slot, so issues you create start "
+              "unapproved: nobody can claim them until the user sets `approved: true` on the card.",
+}
+
+
+def approval_note(card: Card) -> str:
+    """The create result's suffix, so the creator never has to infer whether the card is approved."""
+    if card.approved:
+        return " (approved: it can be claimed straight away)"
+    return " (not approved yet: the user must set `approved: true` on the card before anyone can claim it)"
+
+
+def mcp_tools(review: bool, worker: bool) -> list[dict]:
+    tools = [t for t in MCP_TOOLS if review or t["name"] != "request_review"]
+    role = "worker" if worker else "orchestrator"
+    return [{**t, "description": CREATE_ISSUE_HELP[role]} if t["name"] == "create_issue" else t
+            for t in tools]
+
+
 MCP_TOOLS = [
     {"name": "guide", "description": "How Mako works and the rules for your role. Read this first.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -1617,8 +1642,7 @@ MCP_TOOLS = [
          "status": {"type": "string", "enum": [*COLUMNS, "discarded"], "description": "Only this column."}}}},
     {"name": "get_issue", "description": "Read an issue card (frontmatter and body).",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
-    {"name": "create_issue", "description": "Create a new issue in the Backlog. A worker's issue needs the "
-     "user's approval (`approved: true`) before it can be claimed.",
+    {"name": "create_issue", "description": CREATE_ISSUE_HELP["orchestrator"],
      "inputSchema": {"type": "object", "properties": {
          "type": {"type": "string", "enum": list(TYPES)},
          "title": {"type": "string"},
@@ -1724,9 +1748,7 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         card = m.new(args["type"], args["title"], args.get("description", ""), args.get("depends_on"),
                      bool(args.get("human")), args.get("publish_to"), args.get("acceptance_criteria"),
                      args.get("merge_to"), agent)
-        result = f"Created {card.id}: {card.title}"
-        if not card.approved:
-            result += " (not approved yet: the user must set `approved: true` on the card before anyone can claim it)"
+        result = f"Created {card.id}: {card.title}{approval_note(card)}"
     elif name == "edit_issue":
         keys = ("title", "type", "description", "append", "depends_on", "add_depends", "remove_depends",
                 "human", "publish_to", "acceptance_criteria", "merge_to")
@@ -1791,8 +1813,9 @@ def serve_mcp() -> None:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            review = bool(Mako(root).review_command)  # read per call: config.json may change
-            result = {"tools": [t for t in MCP_TOOLS if review or t["name"] != "request_review"]}
+            m = Mako(root)
+            # Read per call: config.json may change.
+            result = {"tools": mcp_tools(bool(m.review_command), agent in m.agents)}
         elif method == "tools/call":
             try:
                 text, is_error = mcp_call(params.get("name"), params.get("arguments") or {}, agent), False
@@ -2385,9 +2408,7 @@ def main(argv: list[str] | None = None) -> int:
         if a.cmd == "new":
             card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human, a.publish_to,
                          cli_criteria(a), a.merge_to, os.environ.get("MAKO_AGENT") or m.agent_from_cwd())
-            out = f"Created {card.id}: {card.title}"
-            if not card.approved:
-                out += " (not approved yet: the user must set `approved: true` on the card)"
+            out = f"Created {card.id}: {card.title}{approval_note(card)}"
         elif a.cmd == "session-name":
             if a.slot != "orchestrator" and a.slot not in m.agents:
                 raise MakoError(f"unknown slot '{a.slot}' (slots: orchestrator, {', '.join(m.agents)})")

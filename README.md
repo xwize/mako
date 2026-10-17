@@ -144,6 +144,12 @@ or by typing it on the board with a `#human` tag. Human cards are a plain kanban
 column, with no locks, branches or merges, and agents can't claim or close them. An agent issue can
 depend on one; it unblocks when you move it to Done.
 
+## Approving issues a worker creates
+
+Issues you or the orchestrator create can be claimed straight away. An issue a worker slot creates
+starts with `approved: false` and shows `[unapproved]` in `mako list`; no agent can claim it until
+you set `approved: true` in the card's properties.
+
 ## Merging into a feature branch
 
 By default closing merges an issue into the base branch. Give a card a `merge_to` branch to merge it
