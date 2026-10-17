@@ -30,6 +30,31 @@ with a TLS or "could not create SSL/TLS secure channel" error, run this first in
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'
 ```
 
+### Linux
+
+Open a terminal in an empty folder that will become the workspace, and run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/xwize/mako/main/install.sh | bash -s -- --project myproj
+```
+
+Leave off `--project myproj` and it asks for a name (it reads your answer from the terminal, so
+this works under `curl | bash` too). Or download `install.sh` and run `./install.sh --project myproj`.
+
+| Option | Meaning |
+| --- | --- |
+| `--project <name>` | Project folder and git repo name (issue ids use it as their prefix). |
+| `--prefix <LETTERS>`, `--agents a,b,c`, `--base <branch>` | Same as the PowerShell options above. |
+| `--ref <branch-or-tag>`, `--repo <url-or-path>` | Mako version and source, as above. |
+| `--upgrade` | The folder is already a workspace: install the downloaded Mako into it. |
+| `--force` | Don't ask before setting up in a folder that isn't empty. |
+| `--path` | Also install `~/.local/bin/mako`, a shim that runs the Mako of the workspace you are in. Errors cleanly outside one. Make sure `~/.local/bin` is on your PATH. |
+
+Needs **Python 3** and **git** (2.30 or newer is best); if either is missing the installer stops
+with an install hint. Optional: a terminal for the launcher (`konsole`, `gnome-terminal` or
+`tmux`) and **Claude Code** (`claude`); it warns if they're missing. No root, and no edits to your
+shell profile. Afterwards use `./mako.sh` for the CLI and `./mako.launch.sh` to start the agents.
+
 ### Options
 
 | Option | Meaning |

@@ -33,7 +33,7 @@ fail() { echo "mako install: $*" >&2; exit 1; }
 warn() { echo "warning: $*" >&2; }
 has() { command -v "$1" >/dev/null 2>&1; }
 # Reading answers works under `curl | bash` too, because the questions come from the terminal, not stdin.
-ask() { if [ -r /dev/tty ]; then read -r -p "$1" REPLY < /dev/tty; else REPLY=""; fi; }
+ask() { REPLY=""; { read -r -p "$1" REPLY < /dev/tty; } 2>/dev/null || REPLY=""; }
 
 echo "Mako installer"
 ROOT="$PWD"
