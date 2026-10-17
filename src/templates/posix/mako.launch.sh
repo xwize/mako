@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Opens the orchestrator and the worker slots in a terminal, like mako.launch.bat does in
 # Windows Terminal. Lives at <root>/mako.launch.sh; the terminal-specific work is in
-# mako.<terminal>.launch.sh next to it.
+# .mako/launchers/mako.<terminal>.launch.sh.
 #
 #   mako.launch.sh [resume]        resume: each agent continues its latest conversation
 #   MAKO_TERMINAL=konsole|gnome-terminal|tmux  force a terminal (default: first found, in that order)
@@ -13,8 +13,9 @@ if [ -z "$TERM_KIND" ]; then
   for t in konsole gnome-terminal tmux; do command -v "$t" >/dev/null && { TERM_KIND="$t"; break; }; done
 fi
 
-if [ -f "$ROOT/mako.$TERM_KIND.launch.sh" ]; then
-  exec bash "$ROOT/mako.$TERM_KIND.launch.sh" "$@"
+LAUNCHER="$ROOT/.mako/launchers/mako.$TERM_KIND.launch.sh"
+if [ -f "$LAUNCHER" ]; then
+  exec bash "$LAUNCHER" "$@"
 fi
 echo "No supported terminal found (konsole, gnome-terminal, tmux). Run each slot in its own terminal:" >&2
 echo "  bash $ROOT/.mako/agent.sh orchestrator   (and agent.sh <slot> for each slot in .mako/config.json)" >&2

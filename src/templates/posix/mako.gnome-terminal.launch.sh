@@ -5,7 +5,7 @@
 #
 #   mako.gnome-terminal.launch.sh [resume]   resume: each agent continues its latest conversation
 
-ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 AGENT="$ROOT/.mako/agent.sh"
 EXTRA=${1:+resume}
 SLOTS=(orchestrator $(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["agents"]))' "$ROOT/.mako/config.json"))

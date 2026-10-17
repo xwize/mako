@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Opens Konsole with the orchestrator and the worker slots side by side in one split window
 # (left to right: orchestrator, then each slot), like mako.launch.bat does in Windows Terminal.
-# Lives at <root>/mako.konsole.launch.sh; mako.launch.sh runs it when Konsole is found.
+# Lives at <root>/.mako/launchers/mako.konsole.launch.sh; mako.launch.sh runs it when Konsole is found.
 #
 #   mako.konsole.launch.sh [resume]   resume: each agent continues its latest conversation
 #   MAKO_KONSOLE=tabs                 one tab per pane instead of a split
 
-ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 AGENT="$ROOT/.mako/agent.sh"
 EXTRA=${1:+resume}
 SLOTS=(orchestrator $(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["agents"]))' "$ROOT/.mako/config.json"))

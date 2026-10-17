@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Opens a tmux session with the orchestrator and the worker slots in split panes. UNTESTED.
-# Lives at <root>/mako.tmux.launch.sh; mako.launch.sh runs it when tmux is the terminal found.
+# Lives at <root>/.mako/launchers/mako.tmux.launch.sh; mako.launch.sh runs it when tmux is the terminal found.
 # Attaches when run in a terminal, else prints the attach command.
 #
 #   mako.tmux.launch.sh [resume]   resume: each agent continues its latest conversation
 
-ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 AGENT="$ROOT/.mako/agent.sh"
 EXTRA=${1:+resume}
 SLOTS=(orchestrator $(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["agents"]))' "$ROOT/.mako/config.json"))

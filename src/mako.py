@@ -1873,9 +1873,9 @@ BIN_SH_LINUX = """\
 # `mako` on PATH in the agent panes (agent.sh puts this folder first).
 exec python3 "$(dirname "$(readlink -f "$0")")/../mako.py" "$@"
 """
-# Written to the workspace root / .mako/ from templates/posix/ on Linux.
-LINUX_ROOT_SCRIPTS = ("mako.launch.sh", "mako.konsole.launch.sh", "mako.gnome-terminal.launch.sh",
-                      "mako.tmux.launch.sh")
+# Written from templates/posix/ on Linux only: mako.launch.sh picks a terminal and runs its
+# script from .mako/launchers/, which Windows has no use for (mako.launch.bat does it all).
+LINUX_TERMINALS = ("konsole", "gnome-terminal", "tmux")
 
 AGENT_CMD = """\
 @echo off
@@ -2138,7 +2138,9 @@ class Init:
         self.write_script(self.root / "mako.sh", ROOT_SH)
         self.write_script(self.dir / "bin-linux" / "mako", BIN_SH_LINUX)
         posix = Path(__file__).resolve().parent / "templates" / "posix"
-        for name, dst in [(n, self.root) for n in LINUX_ROOT_SCRIPTS] + [("agent.sh", self.dir)]:
+        scripts = [("mako.launch.sh", self.root), ("agent.sh", self.dir)]
+        scripts += [(f"mako.{t}.launch.sh", self.dir / "launchers") for t in LINUX_TERMINALS]
+        for name, dst in scripts:
             if (posix / name).is_file():
                 # LF only: a Windows checkout with autocrlf gives these CRLF, and bash then fails on every line.
                 self.write_script(dst / name, (posix / name).read_bytes().replace(b"\r\n", b"\n"))

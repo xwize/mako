@@ -10,8 +10,10 @@ from helpers import SRC, fails, new_workspace, ok, run
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="runs bash scripts")
 
-LINUX_FILES = ("mako.sh", "mako.launch.sh", "mako.konsole.launch.sh", "mako.gnome-terminal.launch.sh",
-               "mako.tmux.launch.sh", ".mako/agent.sh", ".mako/bin-linux/mako")
+LAUNCHERS = ".mako/launchers"
+LINUX_FILES = ("mako.sh", "mako.launch.sh", ".mako/agent.sh", ".mako/bin-linux/mako",
+               f"{LAUNCHERS}/mako.konsole.launch.sh", f"{LAUNCHERS}/mako.gnome-terminal.launch.sh",
+               f"{LAUNCHERS}/mako.tmux.launch.sh")
 WINDOWS_FILES = ("mako.cmd", "mako.launch.bat", ".mako/agent.cmd", ".mako/bin/mako.cmd", ".mako/bin/mako")
 
 
@@ -118,7 +120,7 @@ def test_agent_sh_warns_about_a_broken_slot_and_repairs_nothing(ws, tmp_path):
 def test_launcher_runs_the_script_for_the_terminal_and_names_none_when_missing(ws, tmp_path):
     for name in ("konsole", "tmux"):
         # A script of the right name stands in for the real terminal-specific one.
-        (ws.root / f"mako.{name}.launch.sh").write_text(f'echo "{name} ran with: $@"\n', encoding="utf-8")
+        (ws.root / LAUNCHERS / f"mako.{name}.launch.sh").write_text(f'echo "{name} ran with: $@"\n', encoding="utf-8")
         env = {**ws.env, "MAKO_TERMINAL": name}
         r = run(["bash", str(ws.root / "mako.launch.sh"), "resume"], ws.root, env)
         assert r.out.strip() == f"{name} ran with: resume"
