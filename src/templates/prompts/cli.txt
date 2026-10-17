@@ -6,6 +6,7 @@
 `mako new|edit .. --criteria ".." (repeatable) | --criteria-file <file>` (Acceptance criteria),
 `mako new .. --depends <ID,..> [--human]`, `mako edit <ID> --human|--no-human`, `mako depend <ID> <DEP..>`, `mako undepend <ID> <DEP..>`,
 `mako new spike .. --publish-to <folder>`, `mako edit <ID> --publish-to <folder>` (spikes, also In Progress),
+`mako new|edit .. --merge-to <branch>` (merge into that branch on close instead of `{base}`; '' clears),
 `mako claim <ID|next>`, `mako close <ID> --note "..."`, `mako release <ID>`,
 `mako discard <ID> [--note ".."] [--force]`, `mako reopen <ID>` (closed or discarded),
 `mako prune [ID..] [--dry-run] [--discarded]` (delete Done issues' merged branches),

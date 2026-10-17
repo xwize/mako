@@ -151,6 +151,16 @@ def unmerged_commits(cwd: Path, branch: str, base: str) -> int:
     return int(git(cwd, "rev-list", "--count", f"{base}..{branch}"))
 
 
+def check_merge_to(cwd: Path, merge_to: str, kind: str | None) -> str:
+    """A merge_to value cleaned up, or MakoError. Empty means the base branch."""
+    merge_to = merge_to.strip()
+    if merge_to and kind == "spike":
+        raise MakoError("merge_to is not for spikes (they never merge)")
+    if merge_to and not git_ok(cwd, "check-ref-format", "--branch", merge_to):
+        raise MakoError(f"merge_to '{merge_to}' is not a valid branch name")
+    return merge_to
+
+
 def spawn_detached(cmd: str, cwd: Path, out) -> None:
     """Start a shell command and don't wait for it. Through the shell so things
     like npx (a .cmd on Windows) resolve; stdin is DEVNULL so it can never read
@@ -839,13 +849,14 @@ class Mako:
     # operations (call through transact)
 
     def _new(self, kind: str, title: str, description: str, depends=None, human: bool = False,
-             publish_to: str | None = None, criteria=None) -> Card:
+             publish_to: str | None = None, criteria=None, merge_to: str | None = None) -> Card:
         if kind not in TYPES:
             raise MakoError(f"type must be one of {', '.join(TYPES)}")
         if not title.strip():
             raise MakoError("title is required")
         if publish_to and kind != "spike":
             raise MakoError("publish_to is for spikes only")
+        merge_to = check_merge_to(self.project, merge_to or "", kind)
         description, lifted = split_criteria(description)
         criteria_text = criteria_lines(criteria) if criteria else lifted or EMPTY_CRITERIA
         cid = self.next_id()
@@ -855,6 +866,8 @@ class Mako:
                 "status": "backlog", "created": now(), "reviews": 0}
         if human:
             meta["human"] = "true"
+        if merge_to:
+            meta["merge_to"] = merge_to
         if kind == "spike":
             meta["publish_to"] = (self.spike_publish_to if publish_to is None else publish_to).strip()
         card = Card(self.open_dir / f"{cid}.md", meta,
@@ -994,14 +1007,16 @@ class Mako:
             if lock.get("reviewed") != head:
                 raise MakoError(f"call `request_review` first (no review for {head[:7]})")
         if pending and not spike:
-            self._merge_into_base(card.id, branch)
+            self._merge_into_base(card.id, branch, card.meta.get("merge_to") or "")
         if lock:
             self._free_slot(card.id, lock, branch)
         # A branch that never had commits is always deleted: there is nothing to keep.
         # With keep_branches, one that was merged (now or before a reopen) is kept for `mako prune`.
         keep = pending if spike else self.keep_branches and (pending or card.meta.get("merged"))
         if branch and branch_exists(self.project, branch) and not keep:
-            git(self.project, "branch", "-d", branch)  # fully merged (or never had commits)
+            # Fully merged (or never had commits). -d only knows the base branch, which a
+            # merge_to merge didn't touch; _merge_into_base already did the merge.
+            git(self.project, "branch", "-D" if card.meta.get("merge_to") and pending else "-d", branch)
         if pending and not spike:
             card.meta["merged"] = now()
         if spike:
@@ -1042,7 +1057,10 @@ class Mako:
             target.write_bytes(filled.encode("utf-8"))
         return target
 
-    def _merge_into_base(self, cid: str, branch: str) -> None:
+    def _merge_into_base(self, cid: str, branch: str, merge_to: str = "") -> None:
+        """Merge the issue branch into merge_to (created from the base branch if missing),
+        else into the base branch. The main checkout is left on the base branch."""
+        target = merge_to or self.base
         if not git_ok(self.project, "merge-base", "--is-ancestor", self.base, branch):
             raise MakoError(f"{branch} is behind {self.base}. In your worktree run `git merge {self.base}`, "
                             f"resolve any conflicts, run the tests and commit, then close {cid} again")
@@ -1051,13 +1069,30 @@ class Mako:
         if not is_clean(self.project):
             raise MakoError(f"the main checkout {self.project} has uncommitted changes; "
                             "it must be clean to merge")
+        created = False
+        if target != self.base:
+            if not branch_exists(self.project, target):
+                git(self.project, "branch", target, self.base)
+                created = True
+            try:
+                git(self.project, "switch", target)
+            except MakoError as e:
+                if created:
+                    git(self.project, "branch", "-D", target)
+                raise MakoError(f"could not switch to {target} to merge {cid}: {e}") from None
         try:
             title = self.get(cid).title
             message = f"Merge {branch} ({cid}): {title}" if self.keep_branches else f"Merge {cid}: {title}"
             git(self.project, "merge", "--no-ff", "-m", message, branch)
         except MakoError as e:
             _git(self.project, "merge", "--abort")
-            raise MakoError(f"merging {branch} into {self.base} failed, nothing was changed: {e}") from None
+            _git(self.project, "switch", self.base)
+            if created:
+                _git(self.project, "branch", "-D", target)
+            raise MakoError(f"merging {branch} into {target} failed, nothing was changed: {e}") from None
+        finally:
+            if target != self.base and current_branch(self.project) != self.base:
+                git(self.project, "switch", self.base)
 
     def _release(self, cid: str, agent: str | None, note: str, force: bool) -> Card:
         """Back to the Backlog without finishing. The branch is kept, so the
@@ -1175,9 +1210,9 @@ class Mako:
     def _edit(self, cid: str, title: str | None, kind: str | None,
               description: str | None, append: str | None,
               depends=None, add_deps=None, remove_deps=None, human=None, publish_to=None,
-              criteria=None) -> Card:
-        """Change a Backlog card's title, type, body, dependencies, human marker or (spikes)
-        publish_to. Holds the issue's claim lock while checking and writing, so a claim and
+              criteria=None, merge_to=None) -> Card:
+        """Change a Backlog card's title, type, body, dependencies, human marker, merge_to or
+        (spikes) publish_to. Holds the issue's claim lock while checking and writing, so a claim and
         an edit can't overlap. publish_to alone may also change while the spike is In Progress."""
         card = self.get(cid)
         cid = card.id
@@ -1189,11 +1224,14 @@ class Mako:
         if publish_to is not None:
             if (kind or card.meta.get("type")) != "spike":
                 raise MakoError("publish_to is for spikes only")
-            others = (title, kind, description, append, depends, add_deps, remove_deps, human, criteria)
+            others = (title, kind, description, append, depends, add_deps, remove_deps, human, criteria,
+                      merge_to)
             if card.status == "in-progress" and all(v is None for v in others):
                 card.meta["publish_to"] = publish_to.strip()
                 self.save(card)
                 return card
+        if merge_to is not None:
+            merge_to = check_merge_to(self.project, merge_to, kind or card.meta.get("type"))
         if title is not None and not title.strip():
             raise MakoError("title can't be empty")
         lifted = None
@@ -1227,6 +1265,8 @@ class Mako:
                     card.meta.setdefault("publish_to", self.spike_publish_to)
                 else:
                     card.meta.pop("publish_to", None)
+                if kind == "spike":
+                    card.meta.pop("merge_to", None)
             if description is not None:
                 card.body = set_section(card.body, cid, "Description", description.strip() or "_TBD_")
             if lifted is not None:
@@ -1247,6 +1287,11 @@ class Mako:
                     card.meta.pop("human", None)
             if publish_to is not None:
                 card.meta["publish_to"] = publish_to.strip()
+            if merge_to is not None:
+                if merge_to:
+                    card.meta["merge_to"] = merge_to
+                else:
+                    card.meta.pop("merge_to", None)
             self.save(card)
         finally:
             shutil.rmtree(lock_dir, ignore_errors=True)
@@ -1282,18 +1327,22 @@ class Mako:
             if branch == self.base or branch in checked_out:
                 lines.append(f"skipped {label}: checked out in a worktree")
                 continue
-            unmerged = unmerged_commits(self.project, branch, self.base)
+            target = card.meta.get("merge_to") or self.base
+            if not branch_exists(self.project, target):
+                target = self.base
+            unmerged = unmerged_commits(self.project, branch, target)
             lost = f", losing {unmerged} unmerged commit{'s' * (unmerged != 1)}" if unmerged else ""
             if card.status == "done" and unmerged:
                 spike = " (a spike's branch)" if card.meta.get("type") == "spike" else ""
                 lines.append(f"skipped {label}: not fully merged, {unmerged} commit"
-                             f"{'s' * (unmerged != 1)} not in {self.base}{spike}")
+                             f"{'s' * (unmerged != 1)} not in {target}{spike}")
                 continue
             if dry_run:
                 lines.append(f"would delete {label}{lost}")
                 continue
             try:
-                git(self.project, "branch", "-D" if card.status == "discarded" else "-d", branch)
+                flag = "-D" if card.status == "discarded" or target != self.base else "-d"
+                git(self.project, "branch", flag, branch)
             except MakoError as e:
                 lines.append(f"skipped {label}: {e}")
                 continue
@@ -1314,9 +1363,9 @@ class Mako:
     # public API
 
     def new(self, kind, title, description="", depends=None, human=False, publish_to=None,
-            criteria=None):
+            criteria=None, merge_to=None):
         return self.transact(lambda: self._new(kind, title, description, depends, human, publish_to,
-                                               criteria))
+                                               criteria, merge_to))
 
     def claim(self, cid, agent):
         return self.transact(lambda: self._claim(cid, agent))
@@ -1344,10 +1393,10 @@ class Mako:
 
     def edit(self, cid, title=None, kind=None, description=None, append=None,
              depends=None, add_deps=None, remove_deps=None, human=None, publish_to=None,
-             criteria=None):
+             criteria=None, merge_to=None):
         return self.transact(lambda: self._edit(cid, title, kind, description, append,
                                                 depends, add_deps, remove_deps, human, publish_to,
-                                                criteria))
+                                                criteria, merge_to))
 
     def sync(self):
         return self.transact(lambda: None)
@@ -1459,7 +1508,8 @@ def fmt_close(m: Mako, card: Card) -> str:
     if card.meta.get("merged"):
         branch = card.meta.get("branch")
         kept = "; branch kept" if branch and branch_exists(m.project, branch) else ""
-        return f"Merged {branch} into the base branch and closed {card.id}{kept}."
+        into = card.meta.get("merge_to") or "the base branch"
+        return f"Merged {branch} into {into} and closed {card.id}{kept}."
     return f"Closed {card.id} (nothing to merge)."
 
 
@@ -1534,7 +1584,11 @@ MCP_TOOLS = [
                                   "the user moves it on the board. Agent issues can depend on it."},
          "publish_to": {"type": "string",
                         "description": "Spikes only: folder that closing copies the spike's summary into "
-                                       "(relative to the workspace root). Omit for the config default."}},
+                                       "(relative to the workspace root). Omit for the config default."},
+         "merge_to": {"type": "string",
+                      "description": "Not for spikes: closing merges the issue branch into this branch "
+                                     "(created from the base branch if missing) instead of the base "
+                                     "branch. Omit for the base branch."}},
          "required": ["type", "title"]}},
     {"name": "edit_issue",
      "description": "Change a Backlog issue's title, type or description, or append a note. "
@@ -1557,7 +1611,10 @@ MCP_TOOLS = [
          "remove_depends": {"type": "array", "items": {"type": "string"}},
          "human": {"type": "boolean", "description": "Mark (true) or unmark (false) it as the user's own task."},
          "publish_to": {"type": "string",
-                        "description": "Spikes only: folder the summary is copied into on close ('' clears)."}},
+                        "description": "Spikes only: folder the summary is copied into on close ('' clears)."},
+         "merge_to": {"type": "string",
+                      "description": "Branch that closing merges into instead of the base branch "
+                                     "('' clears). Not for spikes."}},
          "required": ["id"]}},
     {"name": "claim_issue",
      "description": "Claim an issue for your slot: locks it, checks out its branch in your worktree, "
@@ -1614,11 +1671,12 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         return fmt_show(m, card)
     if name == "create_issue":
         card = m.new(args["type"], args["title"], args.get("description", ""), args.get("depends_on"),
-                     bool(args.get("human")), args.get("publish_to"), args.get("acceptance_criteria"))
+                     bool(args.get("human")), args.get("publish_to"), args.get("acceptance_criteria"),
+                     args.get("merge_to"))
         result = f"Created {card.id}: {card.title}"
     elif name == "edit_issue":
         keys = ("title", "type", "description", "append", "depends_on", "add_depends", "remove_depends",
-                "human", "publish_to", "acceptance_criteria")
+                "human", "publish_to", "acceptance_criteria", "merge_to")
         fields = [args.get(k) for k in keys]
         if all(v is None for v in fields):
             raise MakoError(f"nothing to change: pass {', '.join(keys)}")
@@ -2120,6 +2178,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="your own task: agents can't claim it, and it moves freely on the board")
     s.add_argument("--publish-to", help="spikes: folder to copy the summary into on close "
                                         "(default: spike_publish_to in config.json)")
+    s.add_argument("--merge-to", help="merge into this branch on close instead of the base branch "
+                                      "(created from the base branch if missing; not for spikes)")
     s.add_argument("--criteria", action="append", metavar="TEXT",
                    help="an acceptance criterion (repeatable)")
     s.add_argument("--criteria-file", metavar="FILE", help="acceptance criteria, one per line")
@@ -2150,6 +2210,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="hand it back to the agents")
     s.add_argument("--publish-to", help="spikes: folder to copy the summary into on close ('' clears); "
                                         "also while In Progress")
+    s.add_argument("--merge-to", help="merge into this branch on close instead of the base branch "
+                                      "('' clears)")
 
     for name, text in (("depend", "make an issue wait for others to be Done"),
                        ("undepend", "remove dependencies from an issue")):
@@ -2219,7 +2281,7 @@ def main(argv: list[str] | None = None) -> int:
         m = Mako(find_root())
         if a.cmd == "new":
             card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human, a.publish_to,
-                         cli_criteria(a))
+                         cli_criteria(a), a.merge_to)
             out = f"Created {card.id}: {card.title}"
         elif a.cmd == "session-name":
             if a.slot != "orchestrator" and a.slot not in m.agents:
@@ -2245,11 +2307,11 @@ def main(argv: list[str] | None = None) -> int:
                     raise MakoError(f"can't read {a.description_file}: {e.strerror}") from None
             criteria = cli_criteria(a)
             if all(v is None for v in (a.title, a.type, desc, a.append, a.depends, a.human, a.publish_to,
-                                       criteria)):
+                                       criteria, a.merge_to)):
                 out = fmt_show(m, m.get(a.id))
             else:
                 card = m.edit(a.id, a.title, a.type, desc, a.append, a.depends, human=a.human,
-                              publish_to=a.publish_to, criteria=criteria)
+                              publish_to=a.publish_to, criteria=criteria, merge_to=a.merge_to)
                 out = f"Edited {card.id}: {card.title}"
         elif a.cmd == "guide":
             out = guide(m, a.agent)

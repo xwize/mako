@@ -14,7 +14,8 @@ another slot's worktree, and never run git commands in {project}/.
       change and what landed on `{base}`, then commit.
    3. Run the tests.
    4. Call `close_issue` with a note on what changed and how you tested it.
-   It merges your branch into `{base}`, moves the card to Done and frees your slot. If it says your
+   It merges your branch into `{base}` (or into the card's `merge_to` branch, if it has one; you
+   still merge `{base}` into your branch as above), moves the card to Done and frees your slot. If it says your
    branch is behind `{base}`, another worker merged first: repeat steps 2-4.
    For a spike, claiming puts a summary file on its branch, `.mako_spikes/spike_<ID>_<slug>.md`
    (the claim prints its path), with the frontmatter filled in. Write your findings in its body.
