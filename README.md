@@ -128,6 +128,14 @@ or by typing it on the board with a `#human` tag. Human cards are a plain kanban
 column, with no locks, branches or merges, and agents can't claim or close them. An agent issue can
 depend on one; it unblocks when you move it to Done.
 
+## Merging into a feature branch
+
+By default closing merges an issue into the base branch. Give a card a `merge_to` branch to merge it
+there instead: `mako new feature "Login" --merge-to feature/auth`, or `mako edit <ID> --merge-to ..`
+while it is in the Backlog (`''` clears). The branch is created from the base branch if it doesn't
+exist. Workers still merge the base branch into their issue branch before closing, and the main
+checkout is left on the base branch, so switch to `merge_to` yourself to try the result. Not for spikes.
+
 ## Spikes
 
 A spike is research or a prototype: it never merges, and closing keeps its branch. Its result is
