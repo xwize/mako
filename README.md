@@ -226,7 +226,9 @@ How it works:
   (you, an administrator) and one per agent slot. It is safe to re-run, and `request_review` runs
   it for you when needed, including after the Gerrit has been reset.
 - Each issue is one change. Every `request_review` uploads the branch, squashed, as a new patch
-  set. The reply links to the change and signs you in as `human`.
+  set. The reply gives two links: the change itself, which opens as whoever your browser is
+  already signed in as, and a sign-in link, which uses dev auth to sign you in as `human` (no
+  password) and then opens the change. Use the sign-in link so your comments and votes are `human`'s.
 - When you've left comments, tell the agent. It calls `review_status` to read them, addresses
   them and asks for review again. You approve in the agent's pane by replying "approve".
 - Gerrit never merges. Closing merges the branch as usual, abandons the change and saves its
