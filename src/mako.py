@@ -68,7 +68,8 @@ def now() -> str:
 #   status(ctx, issue_id) -> dict                     review_status, `mako review <ID> --status`
 #   finish(ctx, issue, event, outcome, note) -> dict  after close/release/discard (event) of an issue with
 #                                                     a ref; on close, {"transcript": markdown} is kept
-#                                                     as kanban/closed/review_<ID>.md
+#                                                     as <review_transcripts_to>/review_<ID>.md if that
+#                                                     config setting names a folder (default: not kept)
 
 
 @lru_cache(maxsize=None)
@@ -479,6 +480,9 @@ class Mako:
         self.keep_branches = self.config.get("keep_branches") is True
         # Pre-fills publish_to on new spikes. Empty: no default.
         self.spike_publish_to = str(self.config.get("spike_publish_to") or "").strip()
+        # Folder (relative: from the workspace root) where close keeps a review backend's transcript.
+        # Empty: none is kept. Never under kanban/, which holds cards only.
+        self.review_transcripts_to = str(self.config.get("review_transcripts_to") or "").strip()
         # /clear nudge: closing an issue open longer than warn_after_minutes or reviewed more than
         # warn_after_reviews times makes that agent's next claim refuse once. 0 turns a test off.
         self.warn_after_minutes = _config_int(self.config, "warn_after_minutes", 30)
@@ -1294,8 +1298,8 @@ class Mako:
 
     def _review_finish(self, card: Card, lock: dict | None, event: str, outcome: str, note: str) -> None:
         """After close, release or discard of an issue the backend was sent: tell it, and on close
-        keep the transcript it returns next to the closed card. Never fails the command: a backend
-        that is down costs a warning."""
+        keep the transcript it returns in review_transcripts_to, if set. Never fails the command: a
+        backend that is down costs a warning."""
         if not self.review_backend or not lock or lock.get("review_ref") is None:
             return
         issue = {"id": card.id, "title": card.title, "branch": card.meta.get("branch", ""),
@@ -1308,10 +1312,20 @@ class Mako:
         except MakoError as e:
             self.note(f"warning: {e}. The review of {card.id} was left as it is")
             return
-        if event == "close" and result.get("transcript"):
-            target = self.closed_dir / f"review_{card.id}.md"  # not <PREFIX>-*.md: not a card
-            write_atomic(target, result["transcript"])
-            self.note(f"wrote the review transcript to kanban/closed/{target.name}")
+        if event == "close" and result.get("transcript") and self.review_transcripts_to:
+            folder = Path(self.review_transcripts_to)
+            target = (folder if folder.is_absolute() else self.root / folder) / f"review_{card.id}.md"
+            if self.kanban.resolve() in target.resolve().parents:
+                self.note(f"warning: review_transcripts_to is inside kanban/, which holds cards only; "
+                          f"the review transcript of {card.id} was not kept")
+                return
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                write_atomic(target, result["transcript"])
+            except OSError as e:
+                self.note(f"warning: could not write the review transcript to {target}: {e}")
+                return
+            self.note(f"wrote the review transcript to {target}")
 
     def review_status(self, cid: str) -> dict:
         """The backend's report on the issue's review."""
@@ -2246,6 +2260,7 @@ class Init:
             config.setdefault("review_command", "")  # listed so they can be found; never changed
             config.setdefault("keep_branches", False)
             config.setdefault("spike_publish_to", "")
+            config.setdefault("review_transcripts_to", "")
             config.setdefault("warn_after_minutes", 30)
             config.setdefault("warn_after_reviews", 2)
             if not config.get("session_tag"):  # backfilled once; an existing tag is never changed
@@ -2266,7 +2281,7 @@ class Init:
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
                 "review_command": "", "keep_branches": False, "spike_publish_to": "",
-                "warn_after_minutes": 30, "warn_after_reviews": 2,
+                "review_transcripts_to": "", "warn_after_minutes": 30, "warn_after_reviews": 2,
                 "session_tag": new_session_tag(self.root)}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
