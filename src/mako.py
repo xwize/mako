@@ -135,6 +135,12 @@ def is_clean(cwd: Path) -> bool:
     return git(cwd, "status", "--porcelain") == ""
 
 
+def is_broken_worktree(wt: Path) -> bool:
+    """True when wt has a .git link that git can't follow (read-only check). Typically the
+    workspace was created on another OS, so the absolute paths git wrote are wrong here."""
+    return (wt / ".git").exists() and not git_ok(wt, "rev-parse", "--git-dir")
+
+
 def current_branch(cwd: Path) -> str | None:
     """None when HEAD is detached."""
     return _git(cwd, "symbolic-ref", "--short", "-q", "HEAD").stdout.strip() or None
@@ -458,6 +464,33 @@ class Mako:
 
     def worktree(self, agent: str) -> Path:
         return self.dir / "worktrees" / agent
+
+    def broken_slots(self) -> list[str]:
+        return [a for a in self.agents if is_broken_worktree(self.worktree(a))]
+
+    def repair(self) -> list[str]:
+        """The only place Mako runs `git worktree repair`, and only when the user asks.
+        Paths must be absolute; relative ones resolve against the repo, not the cwd."""
+        before = set(self.broken_slots())
+        existing = [self.worktree(a) for a in self.agents if (self.worktree(a) / ".git").exists()]
+        if existing:
+            r = _git(self.project, "worktree", "repair", *map(str, existing))
+            if r.returncode != 0:
+                raise MakoError((r.stderr or r.stdout).strip() or "git worktree repair failed")
+        after = set(self.broken_slots())
+        lines = []
+        for a in self.agents:
+            if a in after:
+                lines.append(f"{a}: still broken")
+            elif a in before:
+                lines.append(f"{a}: repaired")
+            elif a in {self.worktree(x).name for x in existing}:
+                lines.append(f"{a}: ok")
+            else:
+                lines.append(f"{a}: no worktree (run mako init)")
+        if after:
+            raise MakoError("could not repair: " + ", ".join(sorted(after)) + "\n" + "\n".join(lines))
+        return lines
 
     def agent_from_cwd(self) -> str | None:
         wt_root = os.path.normcase(str(self.dir / "worktrees"))
@@ -905,6 +938,10 @@ class Mako:
         wt = self.worktree(agent)
         if not wt.is_dir():
             raise MakoError(f"worktree for {agent} is missing: {wt}")
+        if is_broken_worktree(wt):
+            raise MakoError(f"{agent}'s worktree is broken: git can't follow its link to the repo. "
+                            "This usually means the workspace was last used on another OS. "
+                            "Run `mako repair` to re-link it.")
         if not is_clean(wt):
             raise MakoError(f"{agent}'s worktree has uncommitted changes; commit or stash them first")
         branch = card.meta.get("branch") or f"{card.meta.get('type', 'feature')}/{cid}-{slugify(card.title)}"
@@ -1845,6 +1882,11 @@ if /i "%SLOT%"=="orchestrator" (
 )
 cd /d "%DIR%"
 
+rem A worker slot whose worktree link is broken (workspace used on another OS): warn, never repair.
+if /i not "%SLOT%"=="orchestrator" (
+  git rev-parse --git-dir >nul 2>&1 || echo WARNING: %SLOT%'s worktree is broken, probably from another OS. Run "mako repair" in the orchestrator pane.
+)
+
 rem Only continue when there is a conversation to continue; otherwise start fresh.
 set "CONTINUE="
 if /i "%~2"=="resume" (
@@ -2043,7 +2085,14 @@ class Init:
             self.log.append(f"warning: {repo.name}/ is not on {base}; closing issues needs it there")
 
     def worktrees(self, repo: Path, base: str, agents: list[str]) -> None:
-        git(repo, "worktree", "prune")
+        # Prune deletes the admin dir of a broken worktree for good, so with any slot broken
+        # (e.g. moved from another OS) it is skipped and the user is pointed at `mako repair`.
+        broken = [a for a in agents if is_broken_worktree(self.dir / "worktrees" / a)]
+        if broken:
+            self.log.append(f"warning: worktree(s) broken: {', '.join(broken)}; skipped git worktree "
+                            "prune. Run `mako repair` to fix them.")
+        else:
+            git(repo, "worktree", "prune")
         for slot in agents:
             wt = self.dir / "worktrees" / slot
             if (wt / ".git").exists():
@@ -2263,6 +2312,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("session", help="exit 0 if Claude has a conversation to continue here (agent.cmd)")
     s = sub.add_parser("session-name", help="print the Claude session name for a slot (agent.cmd)")
     s.add_argument("slot", help="an agent slot or 'orchestrator'")
+    sub.add_parser("repair", help="re-link the slot worktrees after the workspace moved or changed OS")
     sub.add_parser("mcp", help="run the MCP server on stdio")
 
     a = p.parse_args(argv)
@@ -2339,6 +2389,8 @@ def main(argv: list[str] | None = None) -> int:
             out = f"Reopened {m.reopen(a.id).id}"
         elif a.cmd == "prune":
             out = "\n".join(m.prune(a.ids, a.dry_run, a.discarded)) or "Nothing to prune."
+        elif a.cmd == "repair":
+            out = "\n".join(m.repair())
         elif a.cmd in ("launch", "resume"):
             out = launch(m, a.who, resume=a.cmd == "resume")
         for n in m.notes:
