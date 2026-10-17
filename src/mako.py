@@ -1617,8 +1617,8 @@ MCP_TOOLS = [
          "status": {"type": "string", "enum": [*COLUMNS, "discarded"], "description": "Only this column."}}}},
     {"name": "get_issue", "description": "Read an issue card (frontmatter and body).",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
-    {"name": "create_issue", "description": "Create a new issue in the Backlog. A worker's issue needs the user's approval "
-     "(`approved: true`) before it can be claimed.",
+    {"name": "create_issue", "description": "Create a new issue in the Backlog. A worker's issue needs the "
+     "user's approval (`approved: true`) before it can be claimed.",
      "inputSchema": {"type": "object", "properties": {
          "type": {"type": "string", "enum": list(TYPES)},
          "title": {"type": "string"},
