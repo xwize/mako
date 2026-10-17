@@ -1,6 +1,6 @@
 ## CLI
 
-`mako` is on PATH in panes started by mako.launch.bat:
+`mako` is on PATH in panes started by mako.launch.bat or mako.launch.sh:
 `mako list [--all]`, `mako status`, `mako show <ID>`, `mako new <feature|bug|spike> "title"`,
 `mako edit <ID> [--title ..] [--type ..] [--description ..|--description-file ..] [--append ..]`,
 `mako new|edit .. --criteria ".." (repeatable) | --criteria-file <file>` (Acceptance criteria),

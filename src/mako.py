@@ -1804,12 +1804,18 @@ def pane_title(project: str, slot: str) -> str:
 
 
 def launch(m: Mako, who: str | None, resume: bool = False) -> str:
-    """Open the agents in Windows Terminal. With resume, each one continues its
-    latest conversation (agent.cmd ... resume -> claude -c)."""
-    if os.name != "nt":
-        raise MakoError("launch currently supports Windows Terminal only")
+    """Open the agents in Windows Terminal (Linux: mako.launch.sh). With resume, each one
+    continues its latest conversation (agent.cmd ... resume -> claude -c)."""
     extra = ["resume"] if resume else []
     verb = "Resumed" if resume else "Opened"
+    if os.name != "nt":
+        if who is not None:
+            raise MakoError("launching a single slot is not supported on Linux yet; "
+                            "run mako.launch.sh to open them all")
+        subprocess.Popen(["bash", str(m.root / "mako.launch.sh"), *extra], cwd=m.root,
+                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return f"{verb} a terminal with all agents"
     if who is None:
         subprocess.Popen(["cmd", "/c", str(m.root / "mako.launch.bat"), *extra], cwd=m.root,
                          creationflags=subprocess.DETACHED_PROCESS)
@@ -1855,6 +1861,21 @@ BIN_SH = """\
 # POSIX shim so `mako` works from Git Bash (Claude Code's shell and `!` commands).
 exec python "$(dirname "$0")/../mako.py" "$@"
 """
+# Linux counterparts. Not named `mako` at the root: that is a valid project name, and the
+# project folder would clash. The shim is in its own folder (bin-linux) because bin/mako is
+# the Git Bash one, and both OSes' files live side by side in a shared workspace.
+ROOT_SH = """\
+#!/bin/sh
+exec python3 "$(dirname "$(readlink -f "$0")")/.mako/mako.py" "$@"
+"""
+BIN_SH_LINUX = """\
+#!/bin/sh
+# `mako` on PATH in the agent panes (agent.sh puts this folder first).
+exec python3 "$(dirname "$(readlink -f "$0")")/../mako.py" "$@"
+"""
+# Written from templates/posix/ on Linux only: mako.launch.sh picks a terminal and runs its
+# script from .mako/launchers/, which Windows has no use for (mako.launch.bat does it all).
+LINUX_TERMINALS = ("konsole", "gnome-terminal", "tmux")
 
 AGENT_CMD = """\
 @echo off
@@ -2009,7 +2030,7 @@ class Init:
         Mako(self.root).sync()  # renders kanban/board.md from the cards
         self.log.append(f"\nMako workspace ready: {self.root}\n"
                         f"  Open this folder as an Obsidian vault to see kanban/board.md.\n"
-                        f"  Run mako.launch.bat to start the orchestrator and {', '.join(agents) or 'no slots'}.\n"
+                        f"  Run {'mako.launch.bat' if os.name == 'nt' else './mako.launch.sh'} to start the orchestrator and {', '.join(agents) or 'no slots'}.\n"
                         f"  Later, `mako resume` reopens them, each continuing its last conversation.")
         return "\n".join(self.log)
 
@@ -2105,12 +2126,29 @@ class Init:
             self.log.append(f"created worktree .mako/worktrees/{slot} (detached at {base})")
 
     def generate(self, project: str, agents: list[str]) -> None:
-        self.write(self.root / "mako.cmd", ROOT_CMD, crlf=True)
-        self.write(self.root / "mako.launch.bat", render_launch_bat(project, agents), crlf=True)
-        self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project, title=safe_title(project)), crlf=True)
-        self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
-        self.write(self.dir / "bin" / "mako", BIN_SH)
-        os.chmod(self.dir / "bin" / "mako", 0o755)
+        """The launchers and shims for this OS only. Re-running init on the other OS adds
+        that OS's files and leaves these alone, so a shared workspace ends up with both."""
+        if os.name == "nt":
+            self.write(self.root / "mako.cmd", ROOT_CMD, crlf=True)
+            self.write(self.root / "mako.launch.bat", render_launch_bat(project, agents), crlf=True)
+            self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project, title=safe_title(project)), crlf=True)
+            self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
+            self.write_script(self.dir / "bin" / "mako", BIN_SH)
+            return
+        self.write_script(self.root / "mako.sh", ROOT_SH)
+        self.write_script(self.dir / "bin-linux" / "mako", BIN_SH_LINUX)
+        posix = Path(__file__).resolve().parent / "templates" / "posix"
+        scripts = [("mako.launch.sh", self.root), ("agent.sh", self.dir)]
+        scripts += [(f"mako.{t}.launch.sh", self.dir / "launchers") for t in LINUX_TERMINALS]
+        for name, dst in scripts:
+            if (posix / name).is_file():
+                # LF only: a Windows checkout with autocrlf gives these CRLF, and bash then fails on every line.
+                self.write_script(dst / name, (posix / name).read_bytes().replace(b"\r\n", b"\n"))
+
+    def write_script(self, path: Path, data: str | bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.write(path, data)
+        os.chmod(path, 0o755)
 
     def prompts(self) -> None:
         """Install the default .mako/prompts/*.txt. These are the user's to edit, so an
@@ -2304,7 +2342,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--dry-run", action="store_true", help="list what would be deleted")
     s.add_argument("--discarded", action="store_true",
                    help="also delete discarded issues' branches (unmerged work is lost)")
-    s = sub.add_parser("launch", help="open Windows Terminal with the agents")
+    s = sub.add_parser("launch", help="open the agents in a terminal (Windows Terminal, or Konsole on Linux)")
     s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
     s = sub.add_parser("resume", help="like launch, but each agent continues its last conversation")
     s.add_argument("who", nargs="?", help="a single slot, or 'orchestrator'")
