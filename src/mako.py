@@ -209,6 +209,12 @@ class Card:
         it moves freely between columns and folders and agents can't work on it."""
         return str(self.meta.get("human", "")).strip().lower() in ("true", "yes", "1")
 
+    @property
+    def approved(self) -> bool:
+        """Frontmatter `approved`: cards an agent created stay unapproved (`false`) until the user
+        ticks it; a card without the field (older, or made by the user) counts as approved."""
+        return str(self.meta.get("approved", "")).strip().lower() not in ("false", "no", "0")
+
     def render(self) -> str:
         keys = list(FIELDS) + [k for k in self.meta if k not in FIELDS]
         lines = ["---"] + [f"{k}: {_yaml_value(self.meta.get(k, ''))}" for k in keys] + ["---"]
@@ -882,7 +888,8 @@ class Mako:
     # operations (call through transact)
 
     def _new(self, kind: str, title: str, description: str, depends=None, human: bool = False,
-             publish_to: str | None = None, criteria=None, merge_to: str | None = None) -> Card:
+             publish_to: str | None = None, criteria=None, merge_to: str | None = None,
+             agent: str | None = None) -> Card:
         if kind not in TYPES:
             raise MakoError(f"type must be one of {', '.join(TYPES)}")
         if not title.strip():
@@ -899,6 +906,7 @@ class Mako:
                 "status": "backlog", "created": now(), "reviews": 0}
         if human:
             meta["human"] = "true"
+        meta["approved"] = "false" if agent in self.agents else "true"  # worker-made cards need the user's OK
         if merge_to:
             meta["merge_to"] = merge_to
         if kind == "spike":
@@ -919,6 +927,9 @@ class Mako:
         cid = card.id
         if card.human:
             raise MakoError(f"{cid} is a human task (human: true); agents can't claim it")
+        if not card.approved:
+            raise MakoError(f"{cid} is not approved: it was created by an agent. "
+                            "The user approves it by setting `approved: true` in the card's properties.")
         if card.status in ("done", "discarded"):
             raise MakoError(f"{cid} is {'closed' if card.status == 'done' else 'discarded'}; reopen it first")
         lock = self.read_lock(cid)
@@ -1389,7 +1400,7 @@ class Mako:
     def _next_backlog(self, kind: str | None) -> Card:
         pos = {cid: i for i, cid in enumerate(self.order)}
         backlog = [c for c in self.cards()
-                   if c.status == "backlog" and not self.read_lock(c.id) and not c.human
+                   if c.status == "backlog" and not self.read_lock(c.id) and not c.human and c.approved
                    and (kind is None or c.meta.get("type") == kind) and not self.blockers(c)]
         if not backlog:
             raise MakoError("no unclaimed, unblocked issues in the backlog"
@@ -1400,9 +1411,9 @@ class Mako:
     # public API
 
     def new(self, kind, title, description="", depends=None, human=False, publish_to=None,
-            criteria=None, merge_to=None):
+            criteria=None, merge_to=None, agent=None):
         return self.transact(lambda: self._new(kind, title, description, depends, human, publish_to,
-                                               criteria, merge_to))
+                                               criteria, merge_to, agent))
 
     def claim(self, cid, agent):
         return self.transact(lambda: self._claim(cid, agent))
@@ -1469,6 +1480,8 @@ def fmt_issue_list(m: Mako, status: str | None = None, include_done: bool = Fals
         lines.append(f"{name} ({len(lane)})")
         for c in lane:
             extra = "  [human]" if c.human else ""
+            if not c.approved:
+                extra += "  [unapproved]"
             if st == "in-progress" and not c.human:
                 extra += f"  [{c.meta.get('claimed_by')}] {c.meta.get('branch')}"
             elif st == "done" and c.meta.get("merged"):
@@ -1604,7 +1617,8 @@ MCP_TOOLS = [
          "status": {"type": "string", "enum": [*COLUMNS, "discarded"], "description": "Only this column."}}}},
     {"name": "get_issue", "description": "Read an issue card (frontmatter and body).",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
-    {"name": "create_issue", "description": "Create a new issue in the Backlog.",
+    {"name": "create_issue", "description": "Create a new issue in the Backlog. A worker's issue needs the user's approval "
+     "(`approved: true`) before it can be claimed.",
      "inputSchema": {"type": "object", "properties": {
          "type": {"type": "string", "enum": list(TYPES)},
          "title": {"type": "string"},
@@ -1709,8 +1723,10 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
     if name == "create_issue":
         card = m.new(args["type"], args["title"], args.get("description", ""), args.get("depends_on"),
                      bool(args.get("human")), args.get("publish_to"), args.get("acceptance_criteria"),
-                     args.get("merge_to"))
+                     args.get("merge_to"), agent)
         result = f"Created {card.id}: {card.title}"
+        if not card.approved:
+            result += " (not approved yet: the user must set `approved: true` on the card before anyone can claim it)"
     elif name == "edit_issue":
         keys = ("title", "type", "description", "append", "depends_on", "add_depends", "remove_depends",
                 "human", "publish_to", "acceptance_criteria", "merge_to")
@@ -2368,8 +2384,10 @@ def main(argv: list[str] | None = None) -> int:
         m = Mako(find_root())
         if a.cmd == "new":
             card = m.new(a.type, " ".join(a.title), a.body, a.depends, a.human, a.publish_to,
-                         cli_criteria(a), a.merge_to)
+                         cli_criteria(a), a.merge_to, os.environ.get("MAKO_AGENT") or m.agent_from_cwd())
             out = f"Created {card.id}: {card.title}"
+            if not card.approved:
+                out += " (not approved yet: the user must set `approved: true` on the card)"
         elif a.cmd == "session-name":
             if a.slot != "orchestrator" and a.slot not in m.agents:
                 raise MakoError(f"unknown slot '{a.slot}' (slots: orchestrator, {', '.join(m.agents)})")
