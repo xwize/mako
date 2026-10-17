@@ -1,8 +1,9 @@
 """Gerrit as Mako's review backend. Standard library only; works on Python 3.8+.
 
-Shipped in templates/gerrit/ and installed into .mako/templates/gerrit/ by `mako init`; mako.py
-imports it when .mako/config.json has "review": {"backend": "gerrit", ...}. It is given a URL and a
-state folder and speaks only Gerrit's HTTP API (REST, and git over HTTP for pushes). How or where the
+Shipped in templates/review/ and installed into .mako/templates/review/ by `mako init`; Mako loads
+it for "review": {"backend": "gerrit", "url": .., "project": ..} in .mako/config.json and calls
+the hooks at the end of this file (setup, request, status, finish). It is given a URL and a state
+folder and speaks only Gerrit's HTTP API (REST, and git over HTTP for pushes). How or where the
 Gerrit runs is not its business, so it needs one in "become any account" dev-auth mode.
 
 - Accounts: the built-in `admin`, plus one per name Mako passes (`human` and the agent slots), each
@@ -32,20 +33,22 @@ ADMIN_ID = 1000000  # dev auth: the built-in administrator, which Gerrit creates
 DEV_AUTH = "DEVELOPMENT_BECOME_ANY_ACCOUNT"
 EMAIL_DOMAIN = "mako.example.com"  # Gerrit rejects reserved TLDs (.local, .test, .invalid)
 TIMEOUT = 15
+# Not localhost: on Windows that tries IPv6 first, which costs about 2 s a call.
+DEFAULT_URL = "http://127.0.0.1:8080"
 APPROVE = 2  # the Code-Review score that approves a change
 
 
-class GerritError(Exception):
-    pass
+class ReviewError(Exception):
+    """Mako shows the message (the hooks' error contract)."""
 
 
-class Unreachable(GerritError):
+class Unreachable(ReviewError):
     """Nothing answers at the URL."""
 
 
-class HttpError(GerritError):
+class HttpError(ReviewError):
     def __init__(self, code: int, method: str, path: str, text: str):
-        super().__init__(f"{method} {path}: HTTP {code} {text.strip()[:200]}")
+        super().__init__(f"Gerrit: {method} {path}: HTTP {code} {text.strip()[:200]}")
         self.code = code
 
 
@@ -91,7 +94,7 @@ def _git(repo: Path, *args: str, env: dict | None = None) -> subprocess.Complete
 def _git_out(repo: Path, *args: str, env: dict | None = None) -> str:
     r = _git(repo, *args, env=env)
     if r.returncode:
-        raise GerritError((r.stderr or r.stdout).strip() or f"git {' '.join(args)} failed")
+        raise ReviewError((r.stderr or r.stdout).strip() or f"git {' '.join(args)} failed")
     return r.stdout.strip()
 
 
@@ -110,6 +113,10 @@ class Gerrit:
         self.accounts = saved.get("accounts", {}) if saved.get("url") == self.url else {}
 
     # HTTP
+
+    def unreachable(self) -> Unreachable:
+        return Unreachable(f"Gerrit not reachable at {self.url}; start it (e.g. trayit) or switch the "
+                           "review backend in .mako/config.json")
 
     def request(self, method: str, path: str, body=None, auth: str = "", cookie: str = "",
                 xsrf: str = "", follow: bool = True):
@@ -135,8 +142,8 @@ class Gerrit:
                 text = err.read().decode("utf-8", "replace")
                 raise HttpError(err.code, method, path.split("?", 1)[0], text) from None
             resp = err
-        except (urllib.error.URLError, OSError) as err:
-            raise Unreachable(f"Gerrit not reachable at {self.url} ({getattr(err, 'reason', err)})") from None
+        except (urllib.error.URLError, OSError):
+            raise self.unreachable() from None
         text = resp.read().decode("utf-8", "replace")
         if text.startswith(")]}'"):
             text = text[4:]
@@ -166,7 +173,7 @@ class Gerrit:
         info, _ = self.request("GET", "/config/server/info")
         auth = (info or {}).get("auth", {}).get("auth_type") if isinstance(info, dict) else None
         if auth != DEV_AUTH:
-            raise GerritError(f"the Gerrit at {self.url} uses auth type {auth or 'unknown'}; Mako needs "
+            raise ReviewError(f"the Gerrit at {self.url} uses auth type {auth or 'unknown'}; Mako needs "
                               f"{DEV_AUTH} (\"become any account\", the official image's default)")
         return info
 
@@ -189,7 +196,7 @@ class Gerrit:
             _, headers = self.request("GET", f"/login/%23%2F?account_id={account_id}", follow=False)
         account = _cookie(headers, "GerritAccount")
         if not account:
-            raise GerritError(f"dev-auth sign-in {'of a new account' if account_id is None else account_id} "
+            raise ReviewError(f"dev-auth sign-in {'of a new account' if account_id is None else account_id} "
                               f"failed at {self.url}")
         _, headers = self.request("GET", "/", cookie=f"GerritAccount={account}")
         xsrf = _cookie(headers, "XSRF_TOKEN")
@@ -316,7 +323,7 @@ class Gerrit:
                 continue
             if r.returncode and ("Could not resolve host" in r.stderr or "Failed to connect" in r.stderr
                                  or "Connection refused" in r.stderr):
-                raise Unreachable(f"Gerrit not reachable at {self.url}")
+                raise self.unreachable()
             return r
         return r
 
@@ -324,7 +331,7 @@ class Gerrit:
         """Gerrit's copy of the base branch follows the workspace's, so a change's parent is known."""
         r = self.git_push(repo, f"refs/heads/{base}:refs/heads/{base}", ADMIN, force=True)
         if r.returncode:
-            raise GerritError(f"could not update {base} in Gerrit: {r.stderr.strip()}")
+            raise ReviewError(f"could not update {base} in Gerrit: {r.stderr.strip()}")
 
     # changes
 
@@ -334,7 +341,7 @@ class Gerrit:
         merge_base = _git_out(repo, "merge-base", base, branch)
         commits = _git_out(repo, "log", "--no-merges", "--format=- %h %s", f"{merge_base}..{branch}")
         if _git_out(repo, "rev-parse", f"{branch}^{{tree}}") == _git_out(repo, "rev-parse", f"{merge_base}^{{tree}}"):
-            raise GerritError(f"nothing to review: {branch} makes no changes to {base}")
+            raise ReviewError(f"nothing to review: {branch} makes no changes to {base}")
         stamp = _git_out(repo, "log", "-1", "--format=%cI", branch)
         email = f"{account}@{EMAIL_DOMAIN}"
         env = {"GIT_AUTHOR_NAME": account, "GIT_AUTHOR_EMAIL": email, "GIT_AUTHOR_DATE": stamp,
@@ -358,10 +365,10 @@ class Gerrit:
                      {"message": f"Restored by Mako: {issue} is in review again."})
         r = self.git_push(repo, f"{commit}:refs/for/{base}%topic={issue}", account)
         if r.returncode and "no new changes" not in r.stderr:
-            raise GerritError(f"push of {issue} to Gerrit failed: {r.stderr.strip()}")
+            raise ReviewError(f"push of {issue} to Gerrit failed: {r.stderr.strip()}")
         change = self.find_change(issue)
         if not change:
-            raise GerritError(f"pushed {issue}, but Gerrit has no change for it")
+            raise ReviewError(f"pushed {issue}, but Gerrit has no change for it")
         revision = change.get("revisions", {}).get(change.get("current_revision"), {})
         return {"change": change["_number"], "patch_set": revision.get("_number"), "new": not r.returncode}
 
@@ -376,7 +383,7 @@ class Gerrit:
     def detail(self, issue: str) -> tuple[dict, dict]:
         change = self.find_change(issue)
         if not change:
-            raise GerritError(f"Gerrit has no change for {issue}; call request_review first")
+            raise ReviewError(f"Gerrit has no change for {issue}; call request_review first")
         number = change["_number"]
         full = self.api("GET", f"/changes/{number}/detail?o=DETAILED_LABELS&o=MESSAGES&o=ALL_REVISIONS"
                                "&o=DETAILED_ACCOUNTS")
@@ -430,6 +437,58 @@ class Gerrit:
         comments as {path: [{"line": n, "message": text}]}."""
         change = self.find_change(issue)
         if not change:
-            raise GerritError(f"Gerrit has no change for {issue}")
+            raise ReviewError(f"Gerrit has no change for {issue}")
         body = {"message": message, "labels": {"Code-Review": score}, "comments": comments or {}}
         self.api("POST", f"/changes/{change['_number']}/revisions/current/review", body, as_=name)
+
+
+# --- Mako's review hooks ---------------------------------------------------------------------
+# ctx: root, repo, project, base, agents, options (the "review" block), state_dir, workspace_tag.
+
+def _client(ctx: dict) -> Gerrit:
+    options = ctx["options"]
+    return Gerrit(str(options.get("url") or DEFAULT_URL), ctx["state_dir"],
+                  str(options.get("project") or ctx["project"]), f"mako-{ctx['workspace_tag']}")
+
+
+def _people(ctx: dict) -> list:
+    return ["human", *ctx["agents"]]
+
+
+def setup(ctx: dict) -> str:
+    """`mako review setup`: accounts for `human` and every slot, the project and the base branch."""
+    g = _client(ctx)
+    done = g.setup(_people(ctx), Path(ctx["repo"]), ctx["base"])
+    return (f"Gerrit at {g.url} is set up for project {g.project}"
+            f"{': made ' + ', '.join(done) if done else ' (nothing new)'}.\n"
+            f"  accounts: admin, {', '.join(_people(ctx))} (tokens in {g.creds_file})")
+
+
+def request(ctx: dict, issue: dict) -> dict:
+    """request_review: upload the issue as the next patch set of its change, as the slot's account
+    (setting Gerrit up first if needed). The ref Mako keeps is the change number."""
+    g = _client(ctx)
+    if not g.ready(_people(ctx)):
+        g.setup(_people(ctx), Path(ctx["repo"]), ctx["base"])
+    pushed = g.push(Path(ctx["repo"]), issue["id"], issue["agent"], issue["branch"], ctx["base"], issue["title"])
+    number = pushed["change"]
+    what = (f"patch set {pushed['patch_set']}" if pushed["new"]
+            else f"nothing new (Gerrit already has this commit as patch set {pushed['patch_set']})")
+    return {"ref": number,
+            "text": f"Uploaded {issue['id']} ({issue['sha'][:7]}) to Gerrit: change {number}, {what}.\n"
+                    f"  change:  {g.change_url(number)}\n"
+                    f"  sign in: {g.sign_in_url(number)}  (opens the change as `human`, no login screen)\n"
+                    "Give the user both links."}
+
+
+def status(ctx: dict, issue_id: str) -> dict:
+    """review_status: state, owner, patch set, votes, messages and inline comments by patch set."""
+    return _client(ctx).status(issue_id)
+
+
+def finish(ctx: dict, issue: dict, event: str, outcome: str, note: str) -> dict:
+    """After close, release or discard: abandon the change with a note (Mako did any merge; Gerrit
+    never submits). On close, return the review's transcript for Mako to keep next to the card."""
+    g = _client(ctx)
+    g.finish(issue["id"], f"Closed by Mako ({outcome}).\n\n{note.strip()}".strip())
+    return {"transcript": g.transcript(issue["id"])} if event == "close" else {}

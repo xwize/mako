@@ -206,6 +206,11 @@ themselves instead of you pasting them. Add a `review` block to `.mako/config.js
 `url` defaults to `http://127.0.0.1:8080` and `project` to the workspace's project name. Use
 `127.0.0.1` rather than `localhost`: on Windows, `localhost` costs about 2 seconds a call.
 
+Mako itself knows nothing about Gerrit. `"backend": "gerrit"` loads
+`.mako/templates/review/gerrit.py`, and Mako calls its hooks: `setup`, `request` (for
+`request_review`), `status` (for `review_status`) and `finish` (after close, release or discard).
+The hooks are described at the top of `mako.py`.
+
 **You supply the Gerrit; Mako doesn't start, stop or install anything.** The reference setup is
 trayit, a tray tool that runs the official `gerritcodereview/gerrit` image in Docker under WSL
 on port 8080. Any Gerrit will do if it is:
@@ -237,8 +242,8 @@ How it works:
 - If the Gerrit is down, `request_review` fails with a message saying so and records nothing:
   start the Gerrit and ask again. Close, release and discard still work and give a warning.
 
-Tokens for the accounts are in `.mako/gerrit/credentials.json`, readable only by you on Linux and
-macOS. Mako's own tools make every Gerrit call, and agents are told not to contact Gerrit
+Tokens for the accounts are in `.mako/review/gerrit/credentials.json`, readable only by you on
+Linux and macOS. Mako's own tools make every Gerrit call, and agents are told not to contact Gerrit
 themselves. Per-slot accounts give *attribution*, not *enforcement*: an agent that read that file
 could act as any account. Several workspaces can share one Gerrit: each gets its own project and
 its own tokens on the shared accounts.
