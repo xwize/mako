@@ -15,7 +15,13 @@ Open PowerShell in an empty folder that will become the workspace, and run:
 irm https://raw.githubusercontent.com/xwize/mako/main/install.ps1 | iex
 ```
 
-It asks for a project name. To pass it (and other options) on the command line instead, use:
+On Linux, open a terminal in an empty folder and run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/xwize/mako/main/install.sh | bash
+```
+
+Either one asks for a project name. To pass it (and other options) on the command line instead, use:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xwize/mako/main/install.ps1))) -Project myproj
@@ -32,14 +38,14 @@ with a TLS or "could not create SSL/TLS secure channel" error, run this first in
 
 ### Linux
 
-Open a terminal in an empty folder that will become the workspace, and run:
+The Linux one-liner at the top asks for the project name once it is running (it reads your answer
+from the terminal, so this works under `curl | bash`). To pass options instead, use
+`bash -s --`, or download `install.sh` and run it directly:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/xwize/mako/main/install.sh | bash -s -- --project myproj
+./install.sh --project myproj
 ```
-
-Leave off `--project myproj` and it asks for a name (it reads your answer from the terminal, so
-this works under `curl | bash` too). Or download `install.sh` and run `./install.sh --project myproj`.
 
 | Option | Meaning |
 | --- | --- |
