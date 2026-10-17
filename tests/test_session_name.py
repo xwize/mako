@@ -142,6 +142,6 @@ class TestAgentCmd:
 
 
 def test_generated_agent_cmd_passes_the_name(ws):
-    agent = (ws.root / ".mako" / "agent.cmd").read_text(encoding="utf-8")
+    agent = mako_mod.AGENT_CMD.format(project="demo", title=mako_mod.safe_title("demo"))
     assert "session-name %SLOT%" in agent
     assert mako(ws, "session-name", "agent-a").code == 0

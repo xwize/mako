@@ -1858,14 +1858,24 @@ ROOT_CMD = '@python "%~dp0.mako\\mako.py" %*\n'
 BIN_CMD = '@python "%~dp0..\\mako.py" %*\n'
 BIN_SH = """\
 #!/bin/sh
-# POSIX shim so `mako` works from Git Bash (Claude Code's shell and `!` commands) and on Linux.
-exec "$(command -v python3 || command -v python)" "$(dirname "$(readlink -f "$0")")/../mako.py" "$@"
+# POSIX shim so `mako` works from Git Bash (Claude Code's shell and `!` commands).
+exec python "$(dirname "$0")/../mako.py" "$@"
 """
-# Not named `mako`: that is a valid project name, and the project folder would clash.
+# Linux counterparts. Not named `mako` at the root: that is a valid project name, and the
+# project folder would clash. The shim is in its own folder (bin-linux) because bin/mako is
+# the Git Bash one, and both OSes' files live side by side in a shared workspace.
 ROOT_SH = """\
 #!/bin/sh
-exec "$(command -v python3 || command -v python)" "$(dirname "$(readlink -f "$0")")/.mako/mako.py" "$@"
+exec python3 "$(dirname "$(readlink -f "$0")")/.mako/mako.py" "$@"
 """
+BIN_SH_LINUX = """\
+#!/bin/sh
+# `mako` on PATH in the agent panes (agent.sh puts this folder first).
+exec python3 "$(dirname "$(readlink -f "$0")")/../mako.py" "$@"
+"""
+# Written to the workspace root / .mako/ from templates/posix/ on Linux.
+LINUX_ROOT_SCRIPTS = ("mako.launch.sh", "mako.konsole.launch.sh", "mako.gnome-terminal.launch.sh",
+                      "mako.tmux.launch.sh")
 
 AGENT_CMD = """\
 @echo off
@@ -2116,21 +2126,27 @@ class Init:
             self.log.append(f"created worktree .mako/worktrees/{slot} (detached at {base})")
 
     def generate(self, project: str, agents: list[str]) -> None:
-        self.write(self.root / "mako.cmd", ROOT_CMD, crlf=True)
-        self.write(self.root / "mako.launch.bat", render_launch_bat(project, agents), crlf=True)
-        self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project, title=safe_title(project)), crlf=True)
-        self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
-        self.write(self.dir / "bin" / "mako", BIN_SH)
-        os.chmod(self.dir / "bin" / "mako", 0o755)
-        # The Linux files are always written too, so a workspace works from either OS with no re-init.
-        self.write(self.root / "mako.sh", ROOT_SH)
-        os.chmod(self.root / "mako.sh", 0o755)
+        """The launchers and shims for this OS only. Re-running init on the other OS adds
+        that OS's files and leaves these alone, so a shared workspace ends up with both."""
+        if os.name == "nt":
+            self.write(self.root / "mako.cmd", ROOT_CMD, crlf=True)
+            self.write(self.root / "mako.launch.bat", render_launch_bat(project, agents), crlf=True)
+            self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project, title=safe_title(project)), crlf=True)
+            self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
+            self.write_script(self.dir / "bin" / "mako", BIN_SH)
+            return
+        self.write_script(self.root / "mako.sh", ROOT_SH)
+        self.write_script(self.dir / "bin-linux" / "mako", BIN_SH_LINUX)
         posix = Path(__file__).resolve().parent / "templates" / "posix"
-        for name, dst in (("mako.launch.sh", self.root), ("agent.sh", self.dir)):
+        for name, dst in [(n, self.root) for n in LINUX_ROOT_SCRIPTS] + [("agent.sh", self.dir)]:
             if (posix / name).is_file():
                 # LF only: a Windows checkout with autocrlf gives these CRLF, and bash then fails on every line.
-                self.write(dst / name, (posix / name).read_bytes().replace(b"\r\n", b"\n"))
-                os.chmod(dst / name, 0o755)
+                self.write_script(dst / name, (posix / name).read_bytes().replace(b"\r\n", b"\n"))
+
+    def write_script(self, path: Path, data: str | bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.write(path, data)
+        os.chmod(path, 0o755)
 
     def prompts(self) -> None:
         """Install the default .mako/prompts/*.txt. These are the user's to edit, so an

@@ -6,11 +6,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import mako as mako_mod  # noqa: E402
 
 
-def test_launcher_titles_include_project_and_slot(ws):
-    bat = (ws.root / "mako.launch.bat").read_text(encoding="utf-8")
+# Rendered here, not read from the workspace: init writes the Windows files only on Windows.
+def test_launcher_titles_include_project_and_slot():
+    bat = mako_mod.render_launch_bat("demo", ["agent-a", "agent-b"])
     for slot in ("orchestrator", "agent-a", "agent-b"):
         assert f'--title "demo [{slot}]" --suppressApplicationTitle' in bat
-    agent = (ws.root / ".mako" / "agent.cmd").read_text(encoding="utf-8")
+    agent = mako_mod.AGENT_CMD.format(project="demo", title=mako_mod.safe_title("demo"))
     assert "title demo [%SLOT%]" in agent
 
 

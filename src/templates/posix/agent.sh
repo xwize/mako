@@ -8,11 +8,10 @@ SLOT="$1"
 [ -n "$SLOT" ] || { echo "usage: agent.sh <slot|orchestrator> [resume]"; exit 1; }
 MAKODIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(dirname "$MAKODIR")"
-PY="$(command -v python3 || command -v python)" || { echo "Python 3 not found"; exit 1; }
-PROJECT="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["project"])' "$MAKODIR/config.json")"
+PROJECT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project"])' "$MAKODIR/config.json")"
 
 export MAKO_AGENT="$SLOT"
-export PATH="$MAKODIR/bin:$PATH"
+export PATH="$MAKODIR/bin-linux:$PATH"
 
 if [ "$SLOT" = orchestrator ]; then
   DIR="$ROOT"; ADD="$ROOT/$PROJECT"
@@ -31,16 +30,16 @@ printf '\033]0;%s\007\033]30;%s\007' "$TITLE" "$TITLE"
 
 ARGS=()
 if [ "$2" = resume ]; then
-  if "$PY" "$MAKODIR/mako.py" session >/dev/null 2>&1; then ARGS+=(-c)
+  if python3 "$MAKODIR/mako.py" session >/dev/null 2>&1; then ARGS+=(-c)
   else echo "No earlier conversation for $SLOT; starting a new one."; fi
 fi
 # Name the session <project>-<slot>-<tag>; Claude drops the name on -c, so -n goes on every launch.
-NAME="$("$PY" "$MAKODIR/mako.py" session-name "$SLOT" 2>/dev/null)"
+NAME="$(python3 "$MAKODIR/mako.py" session-name "$SLOT" 2>/dev/null)"
 [ -n "$NAME" ] && ARGS+=(-n "$NAME")
 
 # MCP config is built here, not read from agents/<slot>.mcp.json: those files hold
 # the absolute path of whichever OS ran `mako init`, which is wrong after switching OS.
-MCP="$("$PY" -c 'import json,sys; print(json.dumps({"mcpServers":{"mako":{"command":sys.argv[1],"args":[sys.argv[2],"mcp"],"env":{"MAKO_AGENT":sys.argv[3]}}}}))' "$PY" "$MAKODIR/mako.py" "$SLOT")"
+MCP="$(python3 -c 'import json,sys; print(json.dumps({"mcpServers":{"mako":{"command":sys.argv[1],"args":[sys.argv[2],"mcp"],"env":{"MAKO_AGENT":sys.argv[3]}}}}))' python3 "$MAKODIR/mako.py" "$SLOT")"
 
 command -v claude >/dev/null || { echo "claude not found on PATH"; exec "${SHELL:-bash}"; }
 claude "${ARGS[@]}" --add-dir "$ADD" --mcp-config "$MCP" --allowedTools mcp__mako
