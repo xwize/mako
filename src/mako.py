@@ -1862,7 +1862,7 @@ rem Starts Claude for one mako slot:  agent.cmd <slot> [resume]
 rem "orchestrator" runs at the workspace root; worker slots run in their worktree.
 rem With "resume", Claude continues the slot's latest conversation (claude -c);
 rem Claude keys conversations by directory, so each slot gets its own back.
-setlocal
+setlocal enabledelayedexpansion
 set "SLOT=%~1"
 if "%SLOT%"=="" (
   echo usage: agent.cmd ^<slot^|orchestrator^> [resume]
@@ -1899,8 +1899,15 @@ rem Claude drops the name on -c, so -n goes on every launch. Without a session_t
 set "SESSION_NAME="
 for /f "usebackq delims=" %%N in (`python "%~dp0mako.py" session-name %SLOT% 2^>nul`) do set "SESSION_NAME=-n %%N"
 
+rem The MCP config is built here from this script's own location, not read from a file, so a
+rem workspace used from another OS never points at a path that does not exist. Forward
+rem slashes keep the JSON valid; !MCP! (delayed) keeps its quotes out of cmd's parsing.
+set "MAKOPY=%~dp0mako.py"
+set "MAKOPY=%MAKOPY:\\=/%"
+set "MCP={{\\"mcpServers\\":{{\\"mako\\":{{\\"command\\":\\"python\\",\\"args\\":[\\"%MAKOPY%\\",\\"mcp\\"],\\"env\\":{{\\"MAKO_AGENT\\":\\"%SLOT%\\"}}}}}}}}"
+
 claude %CONTINUE% %SESSION_NAME% --add-dir "%ADD%" ^
-  --mcp-config "%ROOT%\\.mako\\agents\\%SLOT%.mcp.json" --allowedTools mcp__mako
+  --mcp-config "!MCP!" --allowedTools mcp__mako
 """
 
 LAUNCH_BAT = """\
@@ -1953,11 +1960,6 @@ def render_launch_bat(project: str, agents: list[str]) -> str:
     diagram = "\n".join([rule, blank, row(names), blank, rule])
     panes = "\n".join(f"rem   pane {k}: {slot}" for k, slot in enumerate(agents, 1)) or "rem   (no slots)"
     return LAUNCH_BAT.format(diagram=diagram, panes=panes, commands=" ; ^\n  ".join(cmds))
-
-
-def mcp_config(script: Path, agent: str) -> str:
-    server = {"command": "python", "args": [script.as_posix(), "mcp"], "env": {"MAKO_AGENT": agent}}
-    return json.dumps({"mcpServers": {"mako": server}}, indent=2) + "\n"
 
 
 # .mako/prompts/worker.finish.txt as the first version of MAKO-0012 shipped it
@@ -2103,15 +2105,12 @@ class Init:
             self.log.append(f"created worktree .mako/worktrees/{slot} (detached at {base})")
 
     def generate(self, project: str, agents: list[str]) -> None:
-        script = self.dir / "mako.py"
         self.write(self.root / "mako.cmd", ROOT_CMD, crlf=True)
         self.write(self.root / "mako.launch.bat", render_launch_bat(project, agents), crlf=True)
         self.write(self.dir / "agent.cmd", AGENT_CMD.format(project=project, title=safe_title(project)), crlf=True)
         self.write(self.dir / "bin" / "mako.cmd", BIN_CMD, crlf=True)
         self.write(self.dir / "bin" / "mako", BIN_SH)
         os.chmod(self.dir / "bin" / "mako", 0o755)
-        for agent in ["orchestrator", *agents]:
-            self.write(self.dir / "agents" / f"{agent}.mcp.json", mcp_config(script, agent))
 
     def prompts(self) -> None:
         """Install the default .mako/prompts/*.txt. These are the user's to edit, so an
