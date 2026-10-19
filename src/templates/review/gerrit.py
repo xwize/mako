@@ -474,7 +474,7 @@ def request(ctx: dict, issue: dict) -> dict:
     number = pushed["change"]
     what = (f"patch set {pushed['patch_set']}" if pushed["new"]
             else f"nothing new (Gerrit already has this commit as patch set {pushed['patch_set']})")
-    return {"ref": number,
+    return {"ref": number, "url": g.change_url(number),
             "text": f"Uploaded {issue['id']} ({issue['sha'][:7]}) to Gerrit: change {number}, {what}.\n"
                     f"  change:  {g.change_url(number)}\n"
                     f"  sign in: {g.sign_in_url(number)}  (opens the change as `human`, no login screen)\n"
