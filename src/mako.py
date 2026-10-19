@@ -2214,7 +2214,10 @@ cd /d "%DIR%"
 
 rem A worker slot whose worktree link is broken (workspace used on another OS): warn, never repair.
 if /i not "%SLOT%"=="orchestrator" (
-  git rev-parse --git-dir >nul 2>&1 || echo WARNING: %SLOT%'s worktree is broken, probably from another OS. Run "mako repair" in the orchestrator pane.
+  git rev-parse --git-dir >nul 2>&1 || (
+    echo WARNING: %SLOT%'s worktree is broken, probably from another OS.
+    echo Run "mako repair" in the orchestrator pane.
+  )
 )
 
 rem Only continue when there is a conversation to continue; otherwise start fresh.
@@ -2234,7 +2237,8 @@ rem workspace used from another OS never points at a path that does not exist. F
 rem slashes keep the JSON valid; !MCP! (delayed) keeps its quotes out of cmd's parsing.
 set "MAKOPY=%~dp0mako.py"
 set "MAKOPY=%MAKOPY:\\=/%"
-set "MCP={{\\"mcpServers\\":{{\\"mako\\":{{\\"command\\":\\"python\\",\\"args\\":[\\"%MAKOPY%\\",\\"mcp\\"],\\"env\\":{{\\"MAKO_AGENT\\":\\"%SLOT%\\"}}}}}}}}"
+set "MCP={{\\"mcpServers\\":{{\\"mako\\":{{\\"command\\":\\"python\\",\\"args\\":[\\"%MAKOPY%\\",\\"mcp\\"],"
+set "MCP=!MCP!\\"env\\":{{\\"MAKO_AGENT\\":\\"%SLOT%\\"}}}}}}}}"
 
 claude %CONTINUE% %SESSION_NAME% --add-dir "%ADD%" ^
   --mcp-config "!MCP!" --allowedTools mcp__mako
@@ -2339,7 +2343,8 @@ class Init:
         Mako(self.root).sync()  # renders kanban/board.md from the cards
         self.log.append(f"\nMako workspace ready: {self.root}\n"
                         f"  Open this folder as an Obsidian vault to see kanban/board.md.\n"
-                        f"  Run {'mako.launch.bat' if os.name == 'nt' else './mako.launch.sh'} to start the orchestrator and {', '.join(agents) or 'no slots'}.\n"
+                        f"  Run {'mako.launch.bat' if os.name == 'nt' else './mako.launch.sh'} to start the "
+                        f"orchestrator and {', '.join(agents) or 'no slots'}.\n"
                         f"  Later, `mako resume` reopens them, each continuing its last conversation.")
         return "\n".join(self.log)
 

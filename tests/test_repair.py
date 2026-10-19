@@ -1,11 +1,13 @@
 """Broken slot worktrees (workspace last used on another OS) and mako repair."""
-from helpers import commit, fails, git, mcp_err, mcp_ok, ok
+from helpers import commit, git, mcp_err, mcp_ok, ok
 
 
 def break_links(ws, slot="agent-a"):
     """Rewrite both git links to Windows paths, as if the workspace was made on Windows."""
-    (ws.root / ".mako" / "worktrees" / slot / ".git").write_text(
-        f"gitdir: S:/proj/{ws.repo.name}/.git/worktrees/{slot}\n", encoding="utf-8")
+    # Git for Windows marks .git hidden, and Windows refuses mode "w" on a hidden file: r+ it.
+    with open(ws.root / ".mako" / "worktrees" / slot / ".git", "r+", encoding="utf-8") as link:
+        link.write(f"gitdir: S:/proj/{ws.repo.name}/.git/worktrees/{slot}\n")
+        link.truncate()
     (ws.repo / ".git" / "worktrees" / slot / "gitdir").write_text(
         f"S:/proj/.mako/worktrees/{slot}/.git\n", encoding="utf-8")
 
