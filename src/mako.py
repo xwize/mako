@@ -63,8 +63,10 @@ def now() -> str:
 # hooks get a context dict (see Mako.review_context) and raise the module's ReviewError for a
 # message to show; Mako calls them, agents never do. Only request is required:
 #   setup(ctx) -> str                                 `mako review setup`
-#   request(ctx, issue) -> {"text": .., "ref": ..}    request_review; issue: id, title, branch, agent, sha.
-#                                                     A ref (not None) marks the issue as sent to it.
+#   request(ctx, issue) -> {"text": .., "ref": .., "url": ..}
+#                                                     request_review; issue: id, title, branch, agent, sha.
+#                                                     A ref (not None) marks the issue as sent to it. ref
+#                                                     and url reach review_hook as {review_ref}, {review_url}.
 #   status(ctx, issue_id) -> dict                     review_status, `mako review <ID> --status`
 #   finish(ctx, issue, event, outcome, note) -> dict  after close/release/discard (event) of an issue with
 #                                                     a ref; on close, {"transcript": markdown} is kept
@@ -198,14 +200,14 @@ def check_merge_to(cwd: Path, merge_to: str, kind: str | None) -> str:
     return merge_to
 
 
-def spawn_detached(cmd: str, cwd: Path, out) -> None:
+def spawn_detached(cmd: str, cwd: Path, out, env: dict | None = None) -> None:
     """Start a shell command and don't wait for it. Through the shell so things
     like npx (a .cmd on Windows) resolve; stdin is DEVNULL so it can never read
     the MCP server's stdin, and output goes to `out`. On Windows it gets a
     hidden console of its own (console children stay hidden too) and its own
     process group, and leaves the caller's job if allowed, so it outlives the
     MCP server."""
-    kw = dict(cwd=str(cwd), shell=True, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
+    kw = dict(cwd=str(cwd), shell=True, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env)
     if os.name != "nt":
         subprocess.Popen(cmd, start_new_session=True, **kw)
         return
@@ -214,6 +216,38 @@ def spawn_detached(cmd: str, cwd: Path, out) -> None:
         subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
     except OSError:  # the job doesn't allow breakaway
         subprocess.Popen(cmd, creationflags=flags, **kw)
+
+
+# --- hooks -------------------------------------------------------------------
+# The user's own commands at points in an issue's life: "<event>_hook" in config.json, a command
+# string or a list of them, each launched detached. Parameters reach a command as {name}
+# placeholders and as MAKO_<NAME> environment variables (see Mako.run_hook).
+
+HOOK_EVENTS = ("new", "claim", "review", "close")
+HOOK_PARAMS = ("id", "title", "type", "base", "branch", "sha", "agent", "root", "repo", "worktree",
+               "review_ref", "review_url")
+PLACEHOLDER = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def hook_commands(value) -> list[str]:
+    """A hook setting as its list of commands: a string is one, blanks are dropped."""
+    items = value if isinstance(value, list) else [value]
+    return [str(item).strip() for item in items if isinstance(item, str) and item.strip()]
+
+
+def expand_placeholders(text: str, values: dict, unknown: list) -> str:
+    """{name} replaced by values[name] in one pass (inserted text is not expanded again);
+    {{ and }} are literal braces. An unknown {name} is left as it is and added to unknown."""
+    def sub(match):
+        name = match.group(1)
+        if name is None:
+            return match.group(0)[0]
+        if name in values:
+            return values[name]
+        if name not in unknown:
+            unknown.append(name)
+        return match.group(0)
+    return PLACEHOLDER.sub(sub, text)
 
 
 # --- cards -----------------------------------------------------------------
@@ -469,10 +503,16 @@ class Mako:
         self.prefix = self.config["prefix"].upper()
         self.base = self.config.get("base_branch", "main")
         self.agents = list(self.config.get("agents", []))
-        # Empty means no review step: no request_review, no gate on close_issue.
-        self.review_command = str(self.config.get("review_command") or "").strip()
-        # "review": {"backend": <name>, ..its options..} picks a review backend (it wins over
-        # review_command). Without it, no backend code is ever loaded.
+        # Hooks: <event>_hook -> its commands. review_command is the legacy name of review_hook.
+        self.hooks = {event: hook_commands(self.config.get(f"{event}_hook")) for event in HOOK_EVENTS}
+        self.legacy_review = hook_commands(self.config.get("review_command"))
+        self.review_hook_wins = bool(self.hooks["review"] and self.legacy_review)
+        self.hooks["review"] = self.hooks["review"] or self.legacy_review
+        params = self.config.get("hook_params")
+        self.hook_params = params if isinstance(params, dict) else {}
+        # "review": {"backend": <name>, ..its options..} picks a review backend. Without one, a
+        # review_hook is the review step and no backend code is ever loaded; with one, the
+        # backend is the review step and the hook runs as well.
         review = self.config.get("review")
         self.review_options = review if isinstance(review, dict) else {}
         self.review_backend = str(self.review_options.get("backend") or "").strip().lower()
@@ -503,9 +543,9 @@ class Mako:
     @property
     def reviewing(self) -> bool:
         """Is there a review step (request_review, and its gate on close_issue)?"""
-        return bool(self.review_command or self.review_backend)
+        return bool(self.hooks["review"] or self.review_backend)
 
-    def review_hook(self, name: str):
+    def backend_hook(self, name: str):
         """The backend's hook `name`, or None (no backend, no such hook, or it can't be loaded)."""
         if not self.review_backend:
             return None
@@ -517,7 +557,7 @@ class Mako:
     @property
     def review_has_status(self) -> bool:
         """Can the backend report on a review (review_status)?"""
-        return self.review_hook("status") is not None
+        return self.backend_hook("status") is not None
 
     # ids & paths
 
@@ -974,6 +1014,7 @@ class Mako:
                     CARD_BODY.format(title=title.strip(), description=description.strip() or "_TBD_",
                                      criteria=criteria_text))
         self.save(card)
+        self.run_hook("new", card)
         return card
 
     def _claim(self, cid: str, agent: str | None) -> dict:
@@ -1041,6 +1082,7 @@ class Mako:
                 shutil.rmtree(lock_dir, ignore_errors=True)
                 raise MakoError(f"could not write the spike summary in {agent}'s worktree: {e}") from None
         self.save(card)
+        self.run_hook("claim", card, owner)
         return self._claim_info(card, agent)
 
     def _start_summary(self, card: Card, wt: Path, agent: str) -> None:
@@ -1109,10 +1151,10 @@ class Mako:
         if spike:
             published = self._finish_summary(card, wt if wt and current_branch(wt) == branch else None, force)
         pending = unmerged_commits(self.project, branch, self.base)
-        if gate and self.reviewing and lock and pending and not force and not spike:
-            head = git(self.project, "rev-parse", branch)
-            if lock.get("reviewed") != head:
-                raise MakoError(f"call `request_review` first (no review for {head[:7]})")
+        head = git(self.project, "rev-parse", branch) if branch and branch_exists(self.project, branch) else ""
+        if (gate and self.reviewing and lock and pending and not force and not spike
+                and lock.get("reviewed") != head):
+            raise MakoError(f"call `request_review` first (no review for {head[:7]})")
         if pending and not spike:
             self._merge_into_base(card.id, branch, card.meta.get("merge_to") or "")
         if lock:
@@ -1140,6 +1182,7 @@ class Mako:
                             if merged else "closed without merging", note)
         if lock:
             self._set_warn_flag(card, lock.get("agent", ""))
+        self.run_hook("close", card, lock, {"sha": head})
         return card
 
     def _finish_summary(self, card: Card, wt: Path | None, force: bool) -> Path | None:
@@ -1221,11 +1264,13 @@ class Mako:
         return card
 
     def _review(self, cid: str, agent: str | None) -> dict:
-        """Launch review_command for a claimed issue, detached (or call the review backend's
-        request hook), and record the commit it covers on the claim (cleared with the claim on
-        close/release)."""
+        """Call the review backend's request hook (then run review_hook, if set), or without a
+        backend launch review_hook as the review step, and record the commit it covers on the
+        claim (cleared with the claim on close/release)."""
         if not self.reviewing:
-            raise MakoError('no review step: set "review_command" or "review" in .mako/config.json')
+            raise MakoError('no review step: set "review_hook" or "review" in .mako/config.json')
+        if self.review_hook_wins:
+            self.note("note: review_hook and the legacy review_command are both set; review_hook is used")
         card = self.get(cid)
         cid = card.id
         lock = self.read_lock(cid)
@@ -1250,23 +1295,76 @@ class Mako:
             if sent.get("ref") is not None:
                 lock["review_ref"] = sent["ref"]
             info = {"text": str(sent.get("text") or f"Sent {cid} for review.")}
+            self.run_hook("review", card, lock, {"sha": head, "review_ref": sent.get("ref"),
+                                                 "review_url": sent.get("url")})
         else:
-            cmd = self.review_command
-            for key, value in {"base": self.base, "branch": branch, "id": cid, "worktree": str(wt)}.items():
-                cmd = cmd.replace("{" + key + "}", value)
-            log = self.dir / "logs" / f"{cid}.review.log"
-            log.parent.mkdir(parents=True, exist_ok=True)
-            with open(log, "w", encoding="utf-8") as out:
-                out.write(f"# {now()}  {cid} at {head}\n# cwd: {wt}\n$ {cmd}\n")
-                out.flush()
-                spawn_detached(cmd, wt, out)
-            info = {"log": str(log), "command": cmd}
+            log, commands = self.run_hook("review", card, lock, {"sha": head}, strict=True)
+            info = {"log": str(log), "command": "\n  ".join(commands)}
         lock.update(reviewed=head, review_requested=now())
         (self.locks / cid / "owner.json").write_text(json.dumps(lock, indent=2), encoding="utf-8")
         # Only reached once the tool has launched. Every round counts, a re-run on the same commit too.
         card.meta["reviews"] = review_count(card) + 1
         self.save(card)
         return {"id": cid, "sha": head, **info}
+
+    # hooks (described at HOOK_EVENTS)
+
+    def run_hook(self, event: str, card: Card, lock: dict | None = None, extra: dict | None = None,
+                 strict: bool = False) -> tuple[Path | None, list[str]]:
+        """Launch the event's hook commands, detached and in order, with their parameters as
+        placeholders and environment variables; logged to .mako/logs/<ID>.<event>.log. A launch
+        failure only warns, unless strict (review_hook as the review step). Returns the log and
+        the expanded commands."""
+        commands = self.hooks.get(event) or []
+        if not commands:
+            return None, []
+        extra = {k: "" if v is None else str(v) for k, v in (extra or {}).items()}
+        agent = (lock or {}).get("agent", "")
+        branch = card.meta.get("branch", "")
+        sha = extra.get("sha")
+        if sha is None:
+            sha = git(self.project, "rev-parse", branch) if branch and branch_exists(self.project, branch) else ""
+        values = {"id": card.id, "title": card.title, "type": card.meta.get("type", ""), "base": self.base,
+                  "branch": branch, "sha": sha, "agent": agent, "root": str(self.root),
+                  "repo": str(self.project), "worktree": str(self.worktree(agent)) if agent else "",
+                  "review_ref": "", "review_url": ""}
+        values.update((k, v) for k, v in extra.items() if k in values)
+        unknown: list[str] = []
+        user = {}
+        for name, raw in self.hook_params.items():
+            if name in HOOK_PARAMS:
+                self.note(f"warning: hook_params can't override the built-in parameter {{{name}}}; ignored")
+            elif not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                self.note(f"warning: hook_params name '{name}' is not a valid parameter name; ignored")
+            else:  # built-in placeholders in the value are expanded, once
+                user[name] = expand_placeholders("" if raw is None else str(raw), values, unknown)
+        # Never MAKO_ROOT: a hook that runs `mako` would act on that workspace. MAKO_WORKSPACE instead.
+        env = {k: v for k, v in os.environ.items() if k.upper() != "MAKO_ROOT"}
+        env.update({f"MAKO_{k.upper()}": v for k, v in values.items() if k != "root"})
+        env.update({f"MAKO_PARAM_{k.upper()}": v for k, v in user.items()})
+        env.update(MAKO_WORKSPACE=values["root"], MAKO_EVENT=event)
+        expanded = [expand_placeholders(cmd, {**values, **user}, unknown) for cmd in commands]
+        if unknown:
+            names = ", ".join("{" + name + "}" for name in unknown)
+            self.note(f"warning: {event}_hook: unknown parameter {names} left as it is")
+        cwd = {"new": self.root, "close": self.project}.get(event) or self.worktree(agent)
+        log = self.dir / "logs" / f"{card.id}.{event}.log"
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "w", encoding="utf-8") as out:
+                for cmd in expanded:
+                    out.write(f"# {now()}  {card.id}{f' at {sha}' if sha else ''}\n# cwd: {cwd}\n$ {cmd}\n")
+                    out.flush()
+                    try:
+                        spawn_detached(cmd, cwd, out, env)
+                    except OSError as e:
+                        out.write(f"# could not launch: {e}\n")
+                        raise
+        except OSError as e:
+            if strict:
+                raise MakoError(f"could not launch the {event}_hook: {e}") from None
+            self.note(f"warning: could not launch the {event}_hook for {card.id}: {e} (log: {log})")
+        return log, expanded
 
     # review backend (the hooks are described at load_review_backend)
 
@@ -1291,7 +1389,7 @@ class Mako:
             raise MakoError(str(e)) from None
 
     def review_setup(self) -> str:
-        if self.review_hook("setup") is None:
+        if self.backend_hook("setup") is None:
             raise MakoError('no review backend with a setup step ("review" in .mako/config.json)')
         with self.backend_errors() as hooks:
             return hooks.setup(self.review_context())
@@ -1305,7 +1403,7 @@ class Mako:
         issue = {"id": card.id, "title": card.title, "branch": card.meta.get("branch", ""),
                  "agent": lock.get("agent", ""), "ref": lock["review_ref"]}
         try:
-            if self.review_hook("finish") is None:
+            if self.backend_hook("finish") is None:
                 return
             with self.backend_errors() as hooks:
                 result = hooks.finish(self.review_context(), issue, event, outcome, note) or {}
@@ -1729,7 +1827,7 @@ def review_cli(m: Mako) -> str:
     found = ["`mako review <ID>` (send it for review again)"]
     if m.review_has_status:
         found.append("`mako review <ID> --status`")
-    if m.review_hook("setup") is not None:
+    if m.backend_hook("setup") is not None:
         found.append("`mako review setup` (set the review backend up)")
     return ", ".join(found) + ",\n"
 
@@ -2253,7 +2351,9 @@ class Init:
                 raise MakoError(f"this workspace's project is '{config['project']}', not '{project}'")
             if any(v is not None for v in (prefix, agents, base)):
                 self.log.append("kept existing .mako/config.json (edit it to change prefix, agents or base)")
-            config.setdefault("review_command", "")  # listed so they can be found; never changed
+            for event in HOOK_EVENTS:  # listed so they can be found; never changed
+                config.setdefault(f"{event}_hook", "")
+            config.setdefault("hook_params", {})
             config.setdefault("keep_branches", False)
             config.setdefault("spike_publish_to", "")
             config.setdefault("review_transcripts_to", "")
@@ -2276,7 +2376,8 @@ class Init:
         if len(set(agents)) != len(agents):
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
-                "review_command": "", "keep_branches": False, "spike_publish_to": "",
+                **{f"{event}_hook": "" for event in HOOK_EVENTS}, "hook_params": {},
+                "keep_branches": False, "spike_publish_to": "",
                 "review_transcripts_to": "", "warn_after_minutes": 30, "warn_after_reviews": 2,
                 "session_tag": new_session_tag(self.root)}
 
@@ -2536,7 +2637,7 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--force", action="store_true", help="act on another slot's claim")
         s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
-    s = sub.add_parser("review", help="run the review step on a claimed issue (review_command, or the review "
+    s = sub.add_parser("review", help="run the review step on a claimed issue (review_hook, or the review "
                        "backend); `mako review setup` sets the backend up")
     s.add_argument("id", help="the issue, or `setup` to set the review backend up")
     s.add_argument("--status", action="store_true", help="print the backend's report on the review as JSON")

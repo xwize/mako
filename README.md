@@ -112,7 +112,7 @@ the files in `.mako/prompts/`:
 | `common.txt` | top of every guide: the workspace and the rules |
 | `worker.txt` | a worker slot's role and how to finish an issue |
 | `orchestrator.txt` | the orchestrator's role |
-| `review.txt` | the code review steps, shown to workers only when `review_command` is set |
+| `review.txt` | the code review steps, shown to workers only when a review step is set (`review_hook` or `review`) |
 | `cli.txt` | the CLI list at the end of every guide |
 | `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
 
@@ -178,26 +178,31 @@ it. A spike with `publish_to` but no summary on its branch can't be closed, exce
 
 ## Code review
 
-Mako can stop each issue for your review before it merges. Set `review_command` in
+Mako can stop each issue for your review before it merges. Set `review_hook` in
 `.mako/config.json` to the tool to open, for example [difit](https://github.com/yoshiko-pg/difit):
 
 ```json
-"review_command": "npx difit HEAD {base}"
+"review_hook": "npx difit HEAD {base}"
 ```
 
 When a worker's branch is ready, it opens the review and waits. Reply "approve" in its pane, or
 paste your comments and it fixes them and asks again. Nothing merges until the latest commits
 have been reviewed. Leave it empty (`""`, the default) to turn review off.
 
-The command can use `{base}`, `{branch}`, `{id}` and `{worktree}`. Its output goes to
-`.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it.
+`review_hook` is one of Mako's [hooks](#hooks), so it can use all of their parameters. Its
+output goes to `.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it. If it can't be
+launched, the review request fails and no review is recorded.
+
+`review_command` is the old name of `review_hook` and still works. If both are set,
+`review_hook` is used and the review request says so.
 
 ### Reviewing in Gerrit (optional)
 
 Instead of a review command, Mako can send each issue to a [Gerrit](https://www.gerritcodereview.com/)
 you run yourself. You get patch sets, inline comments and votes, and agents read your comments
-themselves instead of you pasting them. Add a `review` block to `.mako/config.json` (it wins over
-`review_command`):
+themselves instead of you pasting them. Add a `review` block to `.mako/config.json`. The backend is
+then the review step, and a `review_hook` still runs after each successful upload, with the
+change in `{review_ref}` and `{review_url}`:
 
 ```json
 "review": {"backend": "gerrit", "url": "http://127.0.0.1:8080", "project": "demo"}
@@ -241,6 +246,66 @@ How it works:
 The account tokens live in `.mako/review/gerrit/credentials.json`, and only Mako's tools call
 Gerrit. Per-slot accounts give *attribution*, not *enforcement*: an agent that read that file could
 act as any account.
+
+## Hooks
+
+Hooks run your own commands at points in an issue's life. Set them in `.mako/config.json`:
+
+| Key | Runs | Working folder |
+| --- | --- | --- |
+| `new_hook` | after an issue is created: `mako new`, `create_issue`, or a card you typed on the board | the workspace |
+| `claim_hook` | after a claim (`mako claim`, `claim_issue`, `claim_next`) has checked out the branch | the slot's worktree |
+| `review_hook` | on every review request (`mako review <ID>`, `request_review`) | the slot's worktree |
+| `close_hook` | after a successful close, once the merge is done; not when the close fails | the main checkout |
+
+Each one is a command or a list of commands. Every command in a list is started in order,
+detached, without waiting for the one before, so a hook never slows Mako down. The output goes to
+`.mako/logs/<ID>.<new|claim|review|close>.log`, with a header (time, folder, the command as run)
+for each command. A hook that can't be launched only prints a warning and the Mako command still
+succeeds. The exception is `review_hook` as the review step (no `review` backend set), which then
+fails the request.
+
+### Parameters
+
+A command can use these placeholders, which Mako fills in before launching it:
+
+| Parameter | Value |
+| --- | --- |
+| `{id}`, `{title}`, `{type}` | the issue |
+| `{base}`, `{branch}`, `{sha}` | the base branch, the issue branch, the branch's head commit |
+| `{agent}` | the slot that holds the claim |
+| `{root}` | the workspace folder (the Obsidian vault, with `kanban/` and `.mako/`) |
+| `{repo}` | the main checkout (`<workspace>/<project>`) |
+| `{worktree}` | the claiming slot's worktree (`.mako/worktrees/<slot>`) |
+| `{review_ref}`, `{review_url}` | `review_hook` only, when the review backend returns them (Gerrit: the change number and its URL) |
+
+- A parameter with no value yet is empty: `new_hook` has no branch, sha, agent or worktree.
+- Values go in as they are. Quote the ones that can hold spaces: `"{worktree}"`.
+- `{{` and `}}` are a literal `{` and `}`.
+- An unknown `{name}` is left as it is, with a warning.
+
+The same values are in the hook's environment as `MAKO_<NAME>` (`MAKO_ID`, `MAKO_BRANCH`,
+`MAKO_WORKTREE`, ...), plus `MAKO_EVENT` (`new`, `claim`, `review` or `close`), so a hook can be a
+script (`.ps1`, `.cmd`, `.sh`) that reads them and needs no quoting. The workspace folder is
+`MAKO_WORKSPACE`, not `MAKO_ROOT`: Mako uses `MAKO_ROOT` to find its workspace, so it is never set
+for a hook.
+
+### Your own parameters
+
+`hook_params` names things once for every hook. Each entry adds a `{name}` placeholder and a
+`MAKO_PARAM_<NAME>` variable. A value can use the built-in placeholders (expanded once). The
+built-in names can't be redefined; Mako warns and ignores them.
+
+```json
+"hook_params": {"ide": "code", "gerrit": "http://127.0.0.1:8080"},
+"new_hook":    "{ide} \"{root}\"",
+"claim_hook":  "{ide} \"{worktree}\"",
+"review_hook": ["{ide} \"{worktree}\"", "start \"\" \"{review_url}\""]
+```
+
+Here a new issue opens the IDE on the workspace and a claim opens it on the slot's worktree. With
+the Gerrit backend, a review request opens the worktree in the IDE and the change in the browser
+at the same time (`start` is cmd's; on Linux use `xdg-open`, on macOS `open`).
 
 ## Reminding you to /clear
 
