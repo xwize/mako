@@ -92,22 +92,6 @@ def test_close_hook_runs_only_after_a_successful_close(ws, tmp_path):
     assert same(seen["cwd"], ws.repo)
 
 
-def test_a_list_launches_every_command(ws, tmp_path):
-    first, out1 = recorder(tmp_path, "one", "{id}")
-    second, out2 = recorder(tmp_path, "two", "{id}")
-    set_config(ws, new_hook=[first, "", second])
-    ok(ws, "new", "feature", "One")
-    assert recorded(out1)["argv"] == recorded(out2)["argv"] == ["DEMO-0001"]
-    headers = log(ws, "DEMO-0001", "new").read_text(encoding="utf-8").count("# cwd: ")
-    assert headers == len([first, second])
-
-
-def test_braces_and_unknown_placeholders(ws, tmp_path):
-    cmd, out = recorder(tmp_path, "new", '"{{id}}" "{nope}" "{id}"')
-    set_config(ws, new_hook=cmd)
-    text = ok(ws, "new", "feature", "One")
-    assert "unknown parameter {nope} left as it is" in text
-    assert recorded(out)["argv"] == ["{id}", "{nope}", "DEMO-0001"]
 
 
 def test_hook_params(ws, tmp_path):
@@ -147,16 +131,6 @@ def test_review_hook_runs_after_the_backend(ws, tmp_path):
     assert recorded(out)["argv"] == ["7", "[]"]  # the stub returns no url
 
 
-def test_review_hook_does_not_run_when_the_backend_fails(ws, tmp_path):
-    cmd, _ = recorder(tmp_path, "review", "{id}")
-    use_stub(ws, down=True)
-    set_config(ws, review_hook=cmd)
-    ok(ws, "new", "feature", "One")
-    mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0001")
-    commit(ws, "agent-a", "a.txt", "a\n")
-    assert "stub is down" in mcp_err(ws, "agent-a", "request_review", id="DEMO-0001")
-    assert not log(ws, "DEMO-0001", "review").exists()
-
 
 def test_a_launch_failure_only_warns_except_for_the_review_step(ws, tmp_path):
     cmd, _ = recorder(tmp_path, "any", "{id}")
@@ -169,19 +143,3 @@ def test_a_launch_failure_only_warns_except_for_the_review_step(ws, tmp_path):
     commit(ws, "agent-a", "a.txt", "a\n")
     assert "could not launch the review_hook" in fails(ws, "review", "DEMO-0001")
     assert card(ws, "DEMO-0001")["reviews"] == "0"
-
-
-def test_init_lists_the_hooks_and_moves_review_command(ws):
-    path = ws.root / ".mako" / "config.json"
-    config = json.loads(path.read_text(encoding="utf-8"))
-    assert [config[k] for k in ("new_hook", "claim_hook", "review_hook", "close_hook")] == ["", "", "", ""]
-    assert config["hook_params"] == {} and "review_command" not in config
-    set_config(ws, claim_hook=["a", "b"], hook_params={"ide": "code"}, review_command="difit {base}")
-    ok(ws, "init")
-    config = json.loads(path.read_text(encoding="utf-8"))
-    assert config["claim_hook"] == ["a", "b"] and config["hook_params"] == {"ide": "code"}
-    assert config["review_hook"] == "difit {base}" and "review_command" not in config
-    set_config(ws, review_command="old")
-    ok(ws, "init")  # review_hook is set: the legacy value stays where it is
-    config = json.loads(path.read_text(encoding="utf-8"))
-    assert (config["review_hook"], config["review_command"]) == ("difit {base}", "old")

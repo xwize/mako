@@ -2351,12 +2351,7 @@ class Init:
                 raise MakoError(f"this workspace's project is '{config['project']}', not '{project}'")
             if any(v is not None for v in (prefix, agents, base)):
                 self.log.append("kept existing .mako/config.json (edit it to change prefix, agents or base)")
-            # Listed so they can be found; a value already there is never changed, except that a
-            # legacy review_command moves into an empty review_hook.
-            if hook_commands(config.get("review_command")) and not hook_commands(config.get("review_hook")):
-                config["review_hook"] = config.pop("review_command")
-                self.log.append("moved review_command into review_hook in .mako/config.json")
-            for event in HOOK_EVENTS:
+            for event in HOOK_EVENTS:  # listed so they can be found; never changed
                 config.setdefault(f"{event}_hook", "")
             config.setdefault("hook_params", {})
             config.setdefault("keep_branches", False)

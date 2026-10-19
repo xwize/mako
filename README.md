@@ -194,8 +194,7 @@ output goes to `.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it. 
 launched, the review request fails and no review is recorded.
 
 `review_command` is the old name of `review_hook` and still works. If both are set,
-`review_hook` is used and the review request says so. `mako init` moves a `review_command` into
-an empty `review_hook`.
+`review_hook` is used and the review request says so.
 
 ### Reviewing in Gerrit (optional)
 
