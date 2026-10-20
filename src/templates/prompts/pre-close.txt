@@ -1,14 +1,7 @@
 ## Checks before close
 
-This workspace runs checks (`pre_close_hook`) when you call `close_issue`. They run in your
-worktree, on your branch, before anything is merged:
+`close_issue` runs this workspace's checks (`pre_close_hook`) in your worktree before merging:
 
 {pre_close_commands}
-If one fails, the close is refused and nothing changes: the card stays In Progress and your
-claim is kept. The error names the failing command and its log and shows the end of its output.
-Fix the problem, commit, and call `close_issue` again. You can't skip the checks.
-
-The checks can be slow. Run them yourself in your worktree before you close (after the
-`git merge {base}`), so a close doesn't fail on something you could have caught. Commit
-everything first: committing during the checks makes the close refuse, and you'd have to close
-again.
+If one fails, nothing is closed and the error names its log: fix the problem, commit and call
+`close_issue` again.

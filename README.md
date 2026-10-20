@@ -336,8 +336,7 @@ output. The output is in `.mako/logs/<ID>.pre_close.log`.
   to the branch while they run makes the close refuse; close again.
 - `mako close --force`, run by you, skips them with a warning. Agents can't: `close_issue` has no
   way to, and `mako close --force` from a worker slot still runs them.
-- Workers' guides get a section (`.mako/prompts/pre-close.txt`) listing the checks and asking them
-  to run the checks themselves before closing.
+- Workers' guides get a short section (`.mako/prompts/pre-close.txt`) listing the checks.
 - Build output in the worktree must be gitignored: checks that leave the worktree unclean refuse
   the close.
 
