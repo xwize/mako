@@ -113,6 +113,7 @@ the files in `.mako/prompts/`:
 | `worker.txt` | a worker slot's role and how to finish an issue |
 | `orchestrator.txt` | the orchestrator's role |
 | `review.txt` | the code review steps, shown to workers only when a review step is set (`review_hook` or `review`) |
+| `pre-close.txt` | the checks close runs, shown to workers only when `pre_close_hook` is set (`{pre_close_commands}` lists them) |
 | `cli.txt` | the CLI list at the end of every guide |
 | `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
 
@@ -256,6 +257,7 @@ Hooks run your own commands at points in an issue's life. Set them in `.mako/con
 | `new_hook` | after an issue is created: `mako new`, `create_issue`, or a card you typed on the board | the workspace |
 | `claim_hook` | after a claim (`mako claim`, `claim_issue`, `claim_next`) has checked out the branch | the slot's worktree |
 | `review_hook` | on every review request (`mako review <ID>`, `request_review`) | the slot's worktree |
+| `pre_close_hook` | on close, before the merge; a failure refuses the close (see [Checks before close](#checks-before-close)) | the slot's worktree, on the branch |
 | `close_hook` | after a successful close, once the merge is done; not when the close fails | the main checkout |
 
 Each one is a command or a list of commands. Every command in a list is started in order,
@@ -263,7 +265,7 @@ detached, without waiting for the one before, so a hook never slows Mako down. T
 `.mako/logs/<ID>.<new|claim|review|close>.log`, with a header (time, folder, the command as run)
 for each command. A hook that can't be launched only prints a warning and the Mako command still
 succeeds. The exception is `review_hook` as the review step (no `review` backend set), which then
-fails the request.
+fails the request. `pre_close_hook` is different again: see below.
 
 ### Parameters
 
@@ -285,7 +287,7 @@ A command can use these placeholders, which Mako fills in before launching it:
 - An unknown `{name}` is left as it is, with a warning.
 
 The same values are in the hook's environment as `MAKO_<NAME>` (`MAKO_ID`, `MAKO_BRANCH`,
-`MAKO_WORKTREE`, ...), plus `MAKO_EVENT` (`new`, `claim`, `review` or `close`), so a hook can be a
+`MAKO_WORKTREE`, ...), plus `MAKO_EVENT` (`new`, `claim`, `review`, `pre_close` or `close`), so a hook can be a
 script (`.ps1`, `.cmd`, `.sh`) that reads them and needs no quoting. The workspace folder is
 `MAKO_WORKSPACE`, not `MAKO_ROOT`: Mako uses `MAKO_ROOT` to find its workspace, so it is never set
 for a hook.
@@ -306,6 +308,38 @@ built-in names can't be redefined; Mako warns and ignores them.
 Here a new issue opens the IDE on the workspace and a claim opens it on the slot's worktree. With
 the Gerrit backend, a review request opens the worktree in the IDE and the change in the browser
 at the same time (`start` is cmd's; on Linux use `xdg-open`, on macOS `open`).
+
+### Checks before close
+
+`pre_close_hook` holds the checks that must pass before an issue merges, such as a full build and
+the unit tests, so neither an agent nor you can forget them:
+
+```json
+"pre_close_hook": ["cmake --build build --config Release", "ctest --test-dir build"],
+"pre_close_timeout": 1800
+```
+
+On close (`close_issue`, `mako close`), after Mako's own checks (owner, clean worktree, review,
+branch not behind the base branch) and before the merge, Mako runs the commands one at a time in
+the slot's worktree, on the issue branch, and waits for each. That branch already contains the
+base branch, so the checks see what will land. If the issue isn't claimed, they run in a
+temporary worktree at the branch (`.mako/tmp/`), removed afterwards. The first command that exits
+non-zero stops the rest and refuses the close: nothing changes, the card stays In Progress and the
+claim is kept. The error names the command, its exit code and the log, and shows the end of its
+output. The output is in `.mako/logs/<ID>.pre_close.log`.
+
+- They take the same parameters, `MAKO_*` variables and `hook_params` as the other hooks.
+- They are skipped for spikes (which never merge) and when the branch has nothing to merge.
+- `pre_close_timeout` (seconds, `0` or unset: no limit) kills a command that runs longer, with
+  everything it started, and refuses the close.
+- The checks run without holding the board, so other commands carry on meanwhile. A commit made
+  to the branch while they run makes the close refuse; close again.
+- `mako close --force`, run by you, skips them with a warning. Agents can't: `close_issue` has no
+  way to, and `mako close --force` from a worker slot still runs them.
+- Workers' guides get a section (`.mako/prompts/pre-close.txt`) listing the checks and asking them
+  to run the checks themselves before closing.
+- Build output in the worktree must be gitignored: checks that leave the worktree unclean refuse
+  the close.
 
 ## Reminding you to /clear
 
