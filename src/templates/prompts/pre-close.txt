@@ -1,0 +1,7 @@
+## Checks before close
+
+`close_issue` runs this workspace's checks (`pre_close_hook`) in your worktree before merging:
+
+{pre_close_commands}
+If one fails, nothing is closed and the error names its log: fix the problem, commit and call
+`close_issue` again.

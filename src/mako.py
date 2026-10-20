@@ -33,6 +33,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -218,12 +219,37 @@ def spawn_detached(cmd: str, cwd: Path, out, env: dict | None = None) -> None:
         subprocess.Popen(cmd, creationflags=flags, **kw)
 
 
+def run_and_wait(cmd: str, cwd: Path, out, env: dict | None, timeout: float | None) -> int | None:
+    """Run a shell command to the end, output to `out`, stdin DEVNULL. Returns its exit
+    code, or None if it ran past timeout (seconds), when its whole process tree is killed."""
+    kw = dict(cwd=str(cwd), shell=True, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env)
+    if os.name == "nt":
+        proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW
+                                | subprocess.CREATE_NEW_PROCESS_GROUP, **kw)
+    else:
+        proc = subprocess.Popen(cmd, start_new_session=True, **kw)
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        else:
+            with suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        return None
+
+
 # --- hooks -------------------------------------------------------------------
 # The user's own commands at points in an issue's life: "<event>_hook" in config.json, a command
 # string or a list of them, each launched detached. Parameters reach a command as {name}
 # placeholders and as MAKO_<NAME> environment variables (see Mako.run_hook).
+# pre_close_hook is the exception: a gate, run and waited for before close merges (see
+# Mako.run_pre_close), with an optional pre_close_timeout in seconds.
 
-HOOK_EVENTS = ("new", "claim", "review", "close")
+HOOK_EVENTS = ("new", "claim", "review", "pre_close", "close")
 HOOK_PARAMS = ("id", "title", "type", "base", "branch", "sha", "agent", "root", "repo", "worktree",
                "review_ref", "review_url")
 PLACEHOLDER = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -510,6 +536,8 @@ class Mako:
         self.hooks["review"] = self.hooks["review"] or self.legacy_review
         params = self.config.get("hook_params")
         self.hook_params = params if isinstance(params, dict) else {}
+        # Seconds a pre_close_hook command may run before it is killed and the close refused. 0: no limit.
+        self.pre_close_timeout = _config_int(self.config, "pre_close_timeout", 0)
         # "review": {"backend": <name>, ..its options..} picks a review backend. Without one, a
         # review_hook is the review step and no backend code is ever loaded; with one, the
         # backend is the review step and the hook runs as well.
@@ -1125,17 +1153,11 @@ class Mako:
         if note.strip():
             card.body = card.body.rstrip("\n") + f"\n\n## {heading} ({agent or 'human'}, {now()})\n\n{note.strip()}\n"
 
-    def _close(self, cid: str, agent: str | None, note: str, force: bool, gate: bool = False) -> Card:
-        """Finish an issue. If its branch has commits they are merged into the
-        base branch first; the branch must already contain the base branch, so
-        conflicts are resolved by the worker in its own worktree, never here.
-        With gate (the agents' close_issue) and a review step configured, the
-        branch's HEAD must be the commit the last request_review covered.
-        Spikes never merge: their result is the closing note, and a branch with
-        commits is kept as it is (no review gate, no behind-base check)."""
+    def _close_refusals(self, cid: str, agent: str | None, force: bool) -> tuple[Card, dict | None, Path | None]:
+        """The checks every close starts with: the card is open, the caller may close it and
+        the owning slot's worktree is clean. Returns the card, its lock and that worktree."""
         card = self.get(cid)
         branch = card.meta.get("branch", "")
-        spike = card.meta.get("type") == "spike"
         if card.status == "done":
             raise MakoError(f"{card.id} is already closed")
         if card.status == "discarded":
@@ -1147,14 +1169,52 @@ class Mako:
             if wt.is_dir() and current_branch(wt) == branch and not is_clean(wt):
                 raise MakoError(f"{lock.get('agent')}'s worktree has uncommitted changes on {branch}; "
                                 "commit them first")
+        return card, lock, wt
+
+    def _review_gate(self, lock: dict | None, head: str, force: bool, gate: bool) -> None:
+        if gate and self.reviewing and lock and not force and lock.get("reviewed") != head:
+            raise MakoError(f"call `request_review` first (no review for {head[:7]})")
+
+    def _pre_close_target(self, cid: str, agent: str | None, force: bool,
+                          gate: bool) -> tuple[Card, dict | None, str, Path | None] | None:
+        """What run_pre_close checks: (card, lock, the branch's HEAD, the slot's worktree if it is
+        on the branch), after every refusal a close would make first. None: nothing to check
+        (a spike, or no commits to merge)."""
+        card, lock, wt = self._close_refusals(cid, agent, force)
+        branch = card.meta.get("branch", "")
+        if card.meta.get("type") == "spike" or not unmerged_commits(self.project, branch, self.base):
+            return None
+        head = git(self.project, "rev-parse", branch)
+        self._review_gate(lock, head, force, gate)
+        self._check_behind(card.id, branch)  # before a slow check, not after it
+        return card, lock, head, wt if wt and wt.is_dir() and current_branch(wt) == branch else None
+
+    def _close(self, cid: str, agent: str | None, note: str, force: bool, gate: bool = False,
+               checked: str = "", unchecked: bool = False) -> Card:
+        """Finish an issue. If its branch has commits they are merged into the
+        base branch first; the branch must already contain the base branch, so
+        conflicts are resolved by the worker in its own worktree, never here.
+        With gate (the agents' close_issue) and a review step configured, the
+        branch's HEAD must be the commit the last request_review covered.
+        With a pre_close_hook, HEAD must be the commit it passed on (checked),
+        unless unchecked (`mako close --force` by a human).
+        Spikes never merge: their result is the closing note, and a branch with
+        commits is kept as it is (no review gate, no behind-base check)."""
+        card, lock, wt = self._close_refusals(cid, agent, force)
+        branch = card.meta.get("branch", "")
+        spike = card.meta.get("type") == "spike"
         published = None
         if spike:
             published = self._finish_summary(card, wt if wt and current_branch(wt) == branch else None, force)
         pending = unmerged_commits(self.project, branch, self.base)
         head = git(self.project, "rev-parse", branch) if branch and branch_exists(self.project, branch) else ""
-        if (gate and self.reviewing and lock and pending and not force and not spike
-                and lock.get("reviewed") != head):
-            raise MakoError(f"call `request_review` first (no review for {head[:7]})")
+        if pending and not spike:
+            self._review_gate(lock, head, force, gate)
+        if self.hooks["pre_close"] and pending and not spike:
+            if unchecked:
+                self.note(f"warning: --force: the pre_close_hook was not run for {card.id}")
+            elif head != checked:
+                raise MakoError(f"{branch} changed while the pre_close_hook ran; close {card.id} again")
         if pending and not spike:
             self._merge_into_base(card.id, branch, card.meta.get("merge_to") or "")
         if lock:
@@ -1210,13 +1270,16 @@ class Mako:
             target.write_bytes(filled.encode("utf-8"))
         return target
 
+    def _check_behind(self, cid: str, branch: str) -> None:
+        if not git_ok(self.project, "merge-base", "--is-ancestor", self.base, branch):
+            raise MakoError(f"{branch} is behind {self.base}. In your worktree run `git merge {self.base}`, "
+                            f"resolve any conflicts, run the tests and commit, then close {cid} again")
+
     def _merge_into_base(self, cid: str, branch: str, merge_to: str = "") -> None:
         """Merge the issue branch into merge_to (created from the base branch if missing),
         else into the base branch. The main checkout is left on the base branch."""
         target = merge_to or self.base
-        if not git_ok(self.project, "merge-base", "--is-ancestor", self.base, branch):
-            raise MakoError(f"{branch} is behind {self.base}. In your worktree run `git merge {self.base}`, "
-                            f"resolve any conflicts, run the tests and commit, then close {cid} again")
+        self._check_behind(cid, branch)
         if current_branch(self.project) != self.base:
             raise MakoError(f"the main checkout {self.project} must be on {self.base} to merge")
         if not is_clean(self.project):
@@ -1315,9 +1378,34 @@ class Mako:
         placeholders and environment variables; logged to .mako/logs/<ID>.<event>.log. A launch
         failure only warns, unless strict (review_hook as the review step). Returns the log and
         the expanded commands."""
-        commands = self.hooks.get(event) or []
-        if not commands:
+        if not self.hooks.get(event):
             return None, []
+        expanded, env, values = self.hook_setup(event, card, lock, extra)
+        sha, agent = values["sha"], values["agent"]
+        cwd = {"new": self.root, "close": self.project}.get(event) or self.worktree(agent)
+        log = self.dir / "logs" / f"{card.id}.{event}.log"
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "w", encoding="utf-8") as out:
+                for cmd in expanded:
+                    out.write(f"# {now()}  {card.id}{f' at {sha}' if sha else ''}\n# cwd: {cwd}\n$ {cmd}\n")
+                    out.flush()
+                    try:
+                        spawn_detached(cmd, cwd, out, env)
+                    except OSError as e:
+                        out.write(f"# could not launch: {e}\n")
+                        raise
+        except OSError as e:
+            if strict:
+                raise MakoError(f"could not launch the {event}_hook: {e}") from None
+            self.note(f"warning: could not launch the {event}_hook for {card.id}: {e} (log: {log})")
+        return log, expanded
+
+    def hook_setup(self, event: str, card: Card, lock: dict | None,
+                   extra: dict | None) -> tuple[list[str], dict, dict]:
+        """The event's commands with their placeholders expanded, their environment, and the
+        built-in parameter values."""
+        commands = self.hooks.get(event) or []
         extra = {k: "" if v is None else str(v) for k, v in (extra or {}).items()}
         agent = (lock or {}).get("agent", "")
         branch = card.meta.get("branch", "")
@@ -1347,24 +1435,61 @@ class Mako:
         if unknown:
             names = ", ".join("{" + name + "}" for name in unknown)
             self.note(f"warning: {event}_hook: unknown parameter {names} left as it is")
-        cwd = {"new": self.root, "close": self.project}.get(event) or self.worktree(agent)
-        log = self.dir / "logs" / f"{card.id}.{event}.log"
+        return expanded, env, values
+
+    def run_pre_close(self, card: Card, lock: dict | None, head: str, wt: Path | None) -> None:
+        """Run the pre_close_hook commands in order and wait for each, in wt (the slot's
+        worktree, on the branch) or, without one, a temporary worktree at head. The first
+        that fails or times out refuses the close. Logged to .mako/logs/<ID>.pre_close.log."""
+        temp = None
+        if wt is None:
+            temp = self.dir / "tmp" / f"pre_close-{card.id}"
+            self._drop_temp_worktree(temp)
+            temp.parent.mkdir(parents=True, exist_ok=True)
+            git(self.project, "worktree", "add", "--detach", str(temp), head)
+            wt = temp
         try:
+            expanded, env, _ = self.hook_setup("pre_close", card, lock, {"sha": head, "worktree": wt})
+            log = self.dir / "logs" / f"{card.id}.pre_close.log"
             log.parent.mkdir(parents=True, exist_ok=True)
-            with open(log, "w", encoding="utf-8") as out:
-                for cmd in expanded:
-                    out.write(f"# {now()}  {card.id}{f' at {sha}' if sha else ''}\n# cwd: {cwd}\n$ {cmd}\n")
+            log.write_text("", encoding="utf-8")
+            timeout = self.pre_close_timeout or None
+            for cmd in expanded:
+                with open(log, "a", encoding="utf-8") as out:
+                    out.write(f"# {now()}  {card.id} at {head}\n# cwd: {wt}\n$ {cmd}\n")
                     out.flush()
+                    start = log.stat().st_size
                     try:
-                        spawn_detached(cmd, cwd, out, env)
+                        code = run_and_wait(cmd, wt, out, env, timeout)
                     except OSError as e:
                         out.write(f"# could not launch: {e}\n")
-                        raise
-        except OSError as e:
-            if strict:
-                raise MakoError(f"could not launch the {event}_hook: {e}") from None
-            self.note(f"warning: could not launch the {event}_hook for {card.id}: {e} (log: {log})")
-        return log, expanded
+                        raise MakoError(f"pre_close_hook: could not launch `{cmd}`: {e}; {card.id} "
+                                        f"was not closed (log: {log})") from None
+                    out.write(f"# timed out after {self.pre_close_timeout}s, killed\n" if code is None
+                              else f"# exit code {code}\n")
+                if code != 0:
+                    with open(log, "rb") as f:
+                        f.seek(start)
+                        lines = f.read().decode("utf-8", "replace").replace("\r\n", "\n").splitlines()
+                    tail = "\n".join(lines[-21:-1])  # the last line is our "# exit code"/"# timed out"
+                    why = (f"timed out after {self.pre_close_timeout}s (killed)" if code is None
+                           else f"failed with exit code {code}")
+                    raise MakoError(f"pre_close_hook: `{cmd}` {why}; {card.id} was not closed. Fix it on "
+                                    f"the branch, commit and close again. Log: {log}"
+                                    + (f"\n--- last lines of its output ---\n{tail}" if tail.strip() else ""))
+            if not temp and not is_clean(wt):
+                raise MakoError(f"the pre_close_hook passed but left changes in {wt} (see `git status`); "
+                                f"{card.id} was not closed. Gitignore its output, or have it clean up, "
+                                "then close again")
+        finally:
+            if temp:
+                self._drop_temp_worktree(temp)
+
+    def _drop_temp_worktree(self, path: Path) -> None:
+        if path.exists():
+            _git(self.project, "worktree", "remove", "--force", str(path))
+            shutil.rmtree(path, ignore_errors=True)
+        _git(self.project, "worktree", "prune")
 
     # review backend (the hooks are described at load_review_backend)
 
@@ -1661,7 +1786,19 @@ class Mako:
         return self.transact(lambda: self._claim(self._next_backlog(kind).id, agent))
 
     def close(self, cid, agent=None, note="", force=False, gate=False):
-        return self.transact(lambda: self._close(cid, agent, note, force, gate))
+        # The pre_close_hook runs between two transactions, not under the board lock: a slow build
+        # would hold up every other command and outlast the lock's staleness timeout. The close
+        # then refuses a branch that moved meanwhile. Only a human's --force skips it.
+        unchecked = force and not gate and agent not in self.agents
+        checked, notes = "", []
+        if self.hooks["pre_close"] and not unchecked:
+            target = self.transact(lambda: self._pre_close_target(cid, agent, force, gate))
+            if target:
+                self.run_pre_close(*target)
+                checked, notes = target[2], self.notes
+        card = self.transact(lambda: self._close(cid, agent, note, force, gate, checked, unchecked))
+        self.notes[:0] = notes
+        return card
 
     def review(self, cid, agent=None):
         return self.transact(lambda: self._review(cid, agent))
@@ -1837,13 +1974,15 @@ def guide(m: Mako, agent: str | None) -> str:
               "agent": agent, "agents": ", ".join(m.agents),
               "worktree": m.worktree(agent) if agent else "",
               # Review text appears only with a review step; otherwise the guide is as before.
-              "review_cli": review_cli(m)}
+              "review_cli": review_cli(m),
+              "pre_close_commands": "".join(f"    {cmd}\n" for cmd in m.hooks["pre_close"])}
     if agent not in m.agents:
         names = ["common", "orchestrator", "cli"]
     else:
         # A backend can bring its own section: .mako/prompts/review-<backend>.txt.
         backend = f"review-{m.review_backend}"
-        names = ["common", "worker", *(["review"] if m.reviewing else []),
+        names = ["common", "worker", *(["pre-close"] if m.hooks["pre_close"] else []),
+                 *(["review"] if m.reviewing else []),
                  *([backend] if m.review_backend and (m.dir / "prompts" / f"{backend}.txt").is_file() else []),
                  "cli"]
     return "\n\n".join(prompt(m, n, values) for n in names) + "\n"
@@ -2359,6 +2498,7 @@ class Init:
             for event in HOOK_EVENTS:  # listed so they can be found; never changed
                 config.setdefault(f"{event}_hook", "")
             config.setdefault("hook_params", {})
+            config.setdefault("pre_close_timeout", 0)
             config.setdefault("keep_branches", False)
             config.setdefault("spike_publish_to", "")
             config.setdefault("review_transcripts_to", "")
@@ -2382,6 +2522,7 @@ class Init:
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
                 **{f"{event}_hook": "" for event in HOOK_EVENTS}, "hook_params": {},
+                "pre_close_timeout": 0,
                 "keep_branches": False, "spike_publish_to": "",
                 "review_transcripts_to": "", "warn_after_minutes": 30, "warn_after_reviews": 2,
                 "session_tag": new_session_tag(self.root)}
@@ -2639,7 +2780,8 @@ def main(argv: list[str] | None = None) -> int:
         s = sub.add_parser(name, help=text)
         s.add_argument("id")
         s.add_argument("--note", default="")
-        s.add_argument("--force", action="store_true", help="act on another slot's claim")
+        s.add_argument("--force", action="store_true", help="act on another slot's claim (close, "
+                       "run by a human: also skip the pre_close_hook)")
         s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
     s = sub.add_parser("review", help="run the review step on a claimed issue (review_hook, or the review "
