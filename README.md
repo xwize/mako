@@ -112,7 +112,7 @@ the files in `.mako/prompts/`:
 | `common.txt` | top of every guide: the workspace and the rules |
 | `worker.txt` | a worker slot's role and how to finish an issue |
 | `orchestrator.txt` | the orchestrator's role |
-| `review.txt` | the code review steps, shown to workers only when a review step is set (`review_hook` or `review`) |
+| `review.txt` | the code review steps, shown to workers unless `auto_approve` is on with no `review_hook` or `review` set |
 | `pre-close.txt` | the checks close runs, shown to workers only when `pre_close_hook` is set (`{pre_close_commands}` lists them) |
 | `cli.txt` | the CLI list at the end of every guide |
 | `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
@@ -179,16 +179,22 @@ it. A spike with `publish_to` but no summary on its branch can't be closed, exce
 
 ## Code review
 
-Mako can stop each issue for your review before it merges. Set `review_hook` in
-`.mako/config.json` to the tool to open, for example [difit](https://github.com/yoshiko-pg/difit):
+Mako stops each issue for your review before it merges. When a worker's branch is ready, it
+asks for review (`request_review`) and waits. Reply "approve" in its pane, or paste your comments
+and it fixes them and asks again. Nothing merges until the latest commits have been reviewed.
+
+By default the review is manual: the worker shows you the change in its pane (a summary, the
+branch name and `git diff <base>...<branch> --stat`). To open a review tool instead, set
+`review_hook` in `.mako/config.json`, for example to [difit](https://github.com/yoshiko-pg/difit):
 
 ```json
 "review_hook": "npx difit HEAD {base}"
 ```
 
-When a worker's branch is ready, it opens the review and waits. Reply "approve" in its pane, or
-paste your comments and it fixes them and asks again. Nothing merges until the latest commits
-have been reviewed. Leave it empty (`""`, the default) to turn review off.
+To let workers merge without your approval, set `"auto_approve": true` (default `false`). It only
+applies when there is no `review_hook` and no `review` backend: a configured review tool is an
+explicit choice, so `auto_approve` is ignored alongside one and each review request says so.
+Spikes are never reviewed (they don't merge), and your own `mako close` isn't held up by it.
 
 `review_hook` is one of Mako's [hooks](#hooks), so it can use all of their parameters. Its
 output goes to `.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it. If it can't be

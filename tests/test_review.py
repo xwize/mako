@@ -10,7 +10,8 @@ def flag_command(flag) -> str:
     return f'"{sys.executable}" -c "{code}"'
 
 
-def test_without_review_command_nothing_changes(ws):
+def test_without_review_command_auto_approve_has_no_review_step(ws):
+    # The ws fixture turns auto_approve on; the default (manual review) is in test_manual_review.py.
     assert "request_review" not in mcp_tools(ws, "agent-a")
     ok(ws, "new", "feature", "One")
     mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0001")

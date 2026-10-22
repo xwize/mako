@@ -544,6 +544,10 @@ class Mako:
         review = self.config.get("review")
         self.review_options = review if isinstance(review, dict) else {}
         self.review_backend = str(self.review_options.get("backend") or "").strip().lower()
+        # With neither a review_hook nor a backend the review step is manual (request_review tells
+        # the agent to show the user the change), unless auto_approve turns it off. A configured
+        # review step is an explicit choice, so auto_approve is ignored alongside one.
+        self.auto_approve = self.config.get("auto_approve") is True
         # On: close keeps the merged branch and names it in the merge commit. Off: it's deleted.
         self.keep_branches = self.config.get("keep_branches") is True
         # Pre-fills publish_to on new spikes. Empty: no default.
@@ -569,9 +573,20 @@ class Mako:
             d.mkdir(parents=True, exist_ok=True)
 
     @property
-    def reviewing(self) -> bool:
-        """Is there a review step (request_review, and its gate on close_issue)?"""
+    def review_configured(self) -> bool:
+        """Is a review tool set up (review_hook or a review backend)?"""
         return bool(self.hooks["review"] or self.review_backend)
+
+    @property
+    def reviewing(self) -> bool:
+        """Is there a review step (request_review, and its gate on close_issue)? Without a
+        configured one it is the manual step, unless auto_approve is on."""
+        return self.review_configured or not self.auto_approve
+
+    @property
+    def manual_review(self) -> bool:
+        """Is the review step manual (the agent shows the user the change itself)?"""
+        return not self.review_configured and not self.auto_approve
 
     def backend_hook(self, name: str):
         """The backend's hook `name`, or None (no backend, no such hook, or it can't be loaded)."""
@@ -1194,7 +1209,7 @@ class Mako:
         """Finish an issue. If its branch has commits they are merged into the
         base branch first; the branch must already contain the base branch, so
         conflicts are resolved by the worker in its own worktree, never here.
-        With gate (the agents' close_issue) and a review step configured, the
+        With gate (the agents' close_issue) and a review step (the default), the
         branch's HEAD must be the commit the last request_review covered.
         With a pre_close_hook, HEAD must be the commit it passed on (checked),
         unless unchecked (`mako close --force` by a human).
@@ -1328,10 +1343,14 @@ class Mako:
 
     def _review(self, cid: str, agent: str | None) -> dict:
         """Call the review backend's request hook (then run review_hook, if set), or without a
-        backend launch review_hook as the review step, and record the commit it covers on the
-        claim (cleared with the claim on close/release)."""
+        backend launch review_hook as the review step, or with neither (the manual step) return
+        the diff stat the agent shows the user; then record the commit it covers on the claim
+        (cleared with the claim on close/release)."""
         if not self.reviewing:
-            raise MakoError('no review step: set "review_hook" or "review" in .mako/config.json')
+            raise MakoError('no review step: auto_approve is on in .mako/config.json and neither '
+                            '"review_hook" nor "review" is set')
+        if self.auto_approve:
+            self.note("note: auto_approve is ignored while a review step is set (review_hook or review)")
         if self.review_hook_wins:
             self.note("note: review_hook and the legacy review_command are both set; review_hook is used")
         card = self.get(cid)
@@ -1360,6 +1379,9 @@ class Mako:
             info = {"text": str(sent.get("text") or f"Sent {cid} for review.")}
             self.run_hook("review", card, lock, {"sha": head, "review_ref": sent.get("ref"),
                                                  "review_url": sent.get("url")})
+        elif self.manual_review:
+            stat = git(self.project, "diff", "--stat", f"{self.base}...{branch}")
+            info = {"manual": True, "branch": branch, "base": self.base, "stat": stat}
         else:
             log, commands = self.run_hook("review", card, lock, {"sha": head}, strict=True)
             info = {"log": str(log), "command": "\n  ".join(commands)}
@@ -1959,6 +1981,8 @@ def review_cli(m: Mako) -> str:
     """The guide's CLI line for the review step: only what this workspace has."""
     if not m.reviewing:
         return ""
+    if m.manual_review:
+        return "`mako review <ID>` (show the change and record it as reviewed),\n"
     if not m.review_backend:
         return "`mako review <ID>` (reopen the review tool),\n"
     found = ["`mako review <ID>` (send it for review again)"]
@@ -2110,9 +2134,9 @@ MCP_TOOLS = [
          "required": ["id"]}},
     {"name": "request_review",
      "description": "Open the configured review tool on your claimed issue's branch for the user "
-                    "(or send it to the review backend), and record the "
-                    "commit it covers. Commit first. Then end your turn and wait for the user to approve "
-                    "or send comments.",
+                    "(or send it to the review backend; with neither, it tells you what to show the "
+                    "user), and record the commit it covers. Commit first. Then end your turn and wait "
+                    "for the user to approve or send comments.",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     {"name": "review_status",
      "description": "The issue's review from the review backend, as JSON (e.g. state, votes, messages and "
@@ -2170,7 +2194,14 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
         result = fmt_close(m, m.close(args["id"], agent, args.get("note", ""), gate=True))
     elif name == "request_review":
         info = m.review(args["id"], agent)
-        if "text" in info:
+        if info.get("manual"):
+            result = (f"Recorded the review of {info['id']} ({info['sha'][:7]}). No review tool is configured, "
+                      "so show the user the change yourself: summarise what changed and why, name the branch "
+                      f"`{info['branch']}` and include this `git diff {info['base']}...{info['branch']} --stat`:\n"
+                      f"{info['stat'] or '(no changes)'}\n"
+                      'End your turn and wait. The user will reply "approve" or send comments; on '
+                      "comments, fix them, re-run the tests, commit and call request_review again.")
+        elif "text" in info:
             then = ("call review_status and address each comment" if m.review_has_status
                     else "fix what they send")
             result = (f"{info['text']}\nEnd your turn and wait. The user will reply \"approve\" or say "
@@ -2502,6 +2533,7 @@ class Init:
             config.setdefault("keep_branches", False)
             config.setdefault("spike_publish_to", "")
             config.setdefault("review_transcripts_to", "")
+            config.setdefault("auto_approve", False)
             config.setdefault("warn_after_minutes", 30)
             config.setdefault("warn_after_reviews", 2)
             if not config.get("session_tag"):  # backfilled once; an existing tag is never changed
@@ -2524,7 +2556,7 @@ class Init:
                 **{f"{event}_hook": "" for event in HOOK_EVENTS}, "hook_params": {},
                 "pre_close_timeout": 0,
                 "keep_branches": False, "spike_publish_to": "",
-                "review_transcripts_to": "", "warn_after_minutes": 30, "warn_after_reviews": 2,
+                "review_transcripts_to": "", "auto_approve": False, "warn_after_minutes": 30, "warn_after_reviews": 2,
                 "session_tag": new_session_tag(self.root)}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
@@ -2884,7 +2916,8 @@ def main(argv: list[str] | None = None) -> int:
             out = json.dumps(m.review_status(a.id), indent=2)
         elif a.cmd == "review":
             info = m.review(a.id, a.agent)
-            out = (info["text"] if "text" in info else
+            out = (f"Recorded the review of {info['id']} ({info['sha'][:7]}) on {info['branch']}:\n{info['stat']}"
+                   if info.get("manual") else info["text"] if "text" in info else
                    f"Opened the review for {info['id']} ({info['sha'][:7]}): {info['command']}\n  log: {info['log']}")
         elif a.cmd == "discard":
             card = m.discard(a.id, a.agent, a.note, a.force)
