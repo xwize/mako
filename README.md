@@ -113,6 +113,7 @@ the files in `.mako/prompts/`:
 | `worker.txt` | a worker slot's role and how to finish an issue |
 | `orchestrator.txt` | the orchestrator's role |
 | `review.txt` | the code review steps, shown to workers unless `auto_approve` is on with no `review_hook` or `review` set |
+| `review-agents.txt` | how workers review each other's issues, shown when the review backend takes comments (Gerrit does) |
 | `pre-close.txt` | the checks close runs, shown to workers only when `pre_close_hook` is set (`{pre_close_commands}` lists them) |
 | `cli.txt` | the CLI list at the end of every guide |
 | `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
@@ -216,7 +217,8 @@ change in `{review_ref}` and `{review_url}`:
 
 Mako itself knows nothing about Gerrit. `"backend": "gerrit"` loads
 `.mako/templates/review/gerrit.py`, and Mako calls its hooks: `setup`, `request` (for
-`request_review`), `status` (for `review_status`) and `finish` (after close, release or discard).
+`request_review`), `status` (for `review_status`), `comment` (for `post_review`) and `finish`
+(after close, release or discard).
 The hooks are described at the top of `mako.py`.
 
 **You supply the Gerrit; Mako doesn't start, stop or install anything.** The reference setup is
@@ -246,6 +248,29 @@ How it works:
   folder (relative to the workspace root, created if needed). Closing then
   saves it as `<folder>/review_<ID>.md`. It's empty by default, which keeps nothing.
 - If the Gerrit is down, `request_review` says so; close, release and discard still work.
+
+#### Agents reviewing each other
+
+With a backend that takes comments (Gerrit does), you can ask one slot to review another's issue
+before you do: "agent-b, review DEMO-0001", or "agent-b, review greet.py in DEMO-0001". The
+reviewer calls `review_status`, reads the uploaded change from its own worktree (`git diff`,
+`git show`; every worktree shares the repo's objects) and posts with `post_review`: a message,
+inline comments and a score of -1, 0 or +1, as its own Gerrit account. Tell the author it's there;
+it reads it with `review_status` like yours.
+
+- Agent reviews are advisory. They never gate a close, an agent can't score +2, and only you
+  approve. Agents treat each other's comments as suggestions and yours as must-fix.
+- A slot can't review its own claim, and a review of an outdated upload (the author asked for
+  review again since) is refused. Comments must be on files the change modifies, at lines that
+  exist. A review of some files only (`files`) says so and can't score +1.
+- Reviewing takes no claim: a slot can review while it holds its own issue.
+- An agent's -1 is dropped by Gerrit on the next patch set, so it doesn't linger after a fix.
+  A score of 0 is comments only and leaves the reviewer's earlier vote on that patch set as it is.
+- `list_issues` (and `mako list`) marks an issue `[in review]` while its latest upload is waiting.
+- From a terminal: `mako review <ID> --comment "msg" [--score N] [--inline path:line=text]..
+  [--comments-file f.json] [--files a,b] [--sha S]`. It posts as `MAKO_AGENT` in an agent pane,
+  else as `human`, who may score -2..2. `--comments-file` holds
+  `[{"path": .., "line": .., "message": ..}]`; leave out `line` for a comment on the whole file.
 
 The account tokens live in `.mako/review/gerrit/credentials.json`, and only Mako's tools call
 Gerrit. Per-slot accounts give *attribution*, not *enforcement*: an agent that read that file could

@@ -85,3 +85,22 @@ def test_unreachable_gerrit_says_what_to_do(ws):
     commit(ws, "agent-a", "a.txt", "a\n")
     assert f"Gerrit not reachable at {url}; start it (e.g. trayit)" in \
         mcp_err(ws, "agent-a", "request_review", id="DEMO-0001")
+
+
+def test_comment_posts_unresolved_to_the_patch_set_and_score_0_keeps_the_vote(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(gerrit.Gerrit, "api", lambda self, method, path, body=None, as_="admin":
+                        sent.append((method, path, body, as_)))
+    ctx = {"options": {}, "state_dir": tmp_path, "project": "demo", "workspace_tag": "demo"}
+    issue = {"id": "DEMO-0001", "ref": 7, "revision": 3}
+    review = {"reviewer": "agent-b", "message": "m", "score": -1,
+              "comments": [{"path": "a.txt", "line": 2, "message": "x"},
+                           {"path": "a.txt", "line": None, "message": "y"}]}
+    out = gerrit.comment(ctx, issue, review)
+    assert "patch set 3: Code-Review -1, 2 inline comments" in out["text"]
+    assert sent[-1] == ("POST", "/changes/7/revisions/3/review",
+                        {"message": "m", "labels": {"Code-Review": -1}, "comments": {"a.txt": [
+                            {"message": "x", "unresolved": True, "line": 2},
+                            {"message": "y", "unresolved": True}]}}, "agent-b")
+    gerrit.comment(ctx, {**issue, "revision": None}, {**review, "score": 0, "comments": []})
+    assert sent[-1][1] == "/changes/7/revisions/current/review" and "labels" not in sent[-1][2]

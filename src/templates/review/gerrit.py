@@ -2,7 +2,7 @@
 
 Shipped in templates/review/ and installed into .mako/templates/review/ by `mako init`; Mako loads
 it for "review": {"backend": "gerrit", "url": .., "project": ..} in .mako/config.json and calls
-the hooks at the end of this file (setup, request, status, finish). It is given a URL and a state
+the hooks at the end of this file (setup, request, status, comment, finish). It is given a URL and a state
 folder and speaks only Gerrit's HTTP API (REST, and git over HTTP for pushes). How or where the
 Gerrit runs is not its business, so it needs one in "become any account" dev-auth mode.
 
@@ -438,8 +438,16 @@ class Gerrit:
         change = self.find_change(issue)
         if not change:
             raise ReviewError(f"Gerrit has no change for {issue}")
-        body = {"message": message, "labels": {"Code-Review": score}, "comments": comments or {}}
-        self.api("POST", f"/changes/{change['_number']}/revisions/current/review", body, as_=name)
+        self.post(change["_number"], "current", name, score, message, comments or {})
+
+    def post(self, number: int, revision, name: str, score: int | None, message: str, comments: dict) -> None:
+        """Review one patch set (or "current") of a change as `name`; score None leaves `name`'s vote
+        as it is (0 would remove it). Gerrit takes votes and comments on outdated patch sets and from
+        the change's owner; Mako checks both first."""
+        body = {"message": message, "comments": comments}
+        if score is not None:
+            body["labels"] = {"Code-Review": score}
+        self.api("POST", f"/changes/{number}/revisions/{revision}/review", body, as_=name)
 
 
 # --- Mako's review hooks ---------------------------------------------------------------------
@@ -474,7 +482,7 @@ def request(ctx: dict, issue: dict) -> dict:
     number = pushed["change"]
     what = (f"patch set {pushed['patch_set']}" if pushed["new"]
             else f"nothing new (Gerrit already has this commit as patch set {pushed['patch_set']})")
-    return {"ref": number, "url": g.change_url(number),
+    return {"ref": number, "url": g.change_url(number), "revision": pushed["patch_set"],
             "text": f"Uploaded {issue['id']} ({issue['sha'][:7]}) to Gerrit: change {number}, {what}.\n"
                     f"  change:  {g.change_url(number)}\n"
                     f"  sign in: {g.sign_in_url(number)}  (opens the change as `human`, no login screen)\n"
@@ -484,6 +492,30 @@ def request(ctx: dict, issue: dict) -> dict:
 def status(ctx: dict, issue_id: str) -> dict:
     """review_status: state, owner, patch set, votes, messages and inline comments by patch set."""
     return _client(ctx).status(issue_id)
+
+
+def comment(ctx: dict, issue: dict, review: dict) -> dict:
+    """post_review: the reviewer's message, Code-Review score and inline comments, posted as the
+    reviewer's account to the patch set request_review uploaded. Comments are sent unresolved
+    (over REST Gerrit's default is resolved, unlike its web UI). Score 0 means comments only, so it
+    sends no vote: a Code-Review 0 would wipe the reviewer's earlier vote on the patch set."""
+    g = _client(ctx)
+    inline: dict = {}
+    for c in review["comments"]:
+        item = {"message": c["message"], "unresolved": True}
+        if c.get("line") is not None:
+            item["line"] = c["line"]
+        inline.setdefault(c["path"], []).append(item)
+    revision = issue.get("revision") or "current"  # an issue uploaded before Mako kept the patch set
+    g.post(issue["ref"], revision, review["reviewer"], review["score"] or None, review["message"], inline)
+    url = g.change_url(issue["ref"])
+    where = f"patch set {revision}" if revision != "current" else "the current patch set"
+    count = len(review["comments"])
+    vote = f"Code-Review {review['score']:+d}" if review["score"] else "no vote"
+    return {"url": url,
+            "text": f"Posted {review['reviewer']}'s review of {issue['id']} to Gerrit change {issue['ref']}, "
+                    f"{where}: {vote}, {count} inline "
+                    f"comment{'s' * (count != 1)}.\n  change: {url}"}
 
 
 def finish(ctx: dict, issue: dict, event: str, outcome: str, note: str) -> dict:
