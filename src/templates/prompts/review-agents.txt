@@ -1,0 +1,17 @@
+### Reviewing each other's issues
+
+The user may ask you to review another slot's issue ("review {prefix}-0001", or "review
+greet.py in {prefix}-0001"). You need no claim for that, and you can do it while holding your own.
+
+1. Call `review_status` on it. It gives `sha` (the upload to review), `parent` and `author`.
+2. Read the change from your own worktree: `git diff <parent> <sha>` (add `-- <path>` for one
+   file), and whole files with `git show <sha>:<path>`. Its line numbers are the ones to use.
+3. Call `post_review` with that `sha`, a message, a score and inline comments on lines of the new
+   version. -1 = must change, 0 = comments only, +1 = looks good to me. If you were asked about
+   some files only, pass them as `files` (a +1 can't vouch for files you didn't read).
+4. Tell the user it's posted. The author reads it with `review_status`.
+
+Never review your own claim. If `post_review` says there is a newer upload, start again at 1.
+
+Comments from another agent on your own issue are suggestions: address them, or say in your
+closing note why not. The user's comments must be addressed. Only the user approves.

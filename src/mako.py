@@ -64,11 +64,21 @@ def now() -> str:
 # hooks get a context dict (see Mako.review_context) and raise the module's ReviewError for a
 # message to show; Mako calls them, agents never do. Only request is required:
 #   setup(ctx) -> str                                 `mako review setup`
-#   request(ctx, issue) -> {"text": .., "ref": .., "url": ..}
+#   request(ctx, issue) -> {"text": .., "ref": .., "url": .., "revision": ..}
 #                                                     request_review; issue: id, title, branch, agent, sha.
 #                                                     A ref (not None) marks the issue as sent to it. ref
 #                                                     and url reach review_hook as {review_ref}, {review_url}.
+#                                                     revision (optional) names what was uploaded (e.g. a
+#                                                     patch set); Mako keeps it and passes it to comment.
 #   status(ctx, issue_id) -> dict                     review_status, `mako review <ID> --status`
+#   comment(ctx, issue, review) -> {"text": .., "url": ..}
+#                                                     post_review, `mako review <ID> --comment`: another
+#                                                     slot (or the human) reviews the uploaded revision.
+#                                                     issue: id, title, branch, agent (the author), sha,
+#                                                     ref, revision. review: reviewer, message, score,
+#                                                     comments [{"path", "line" (None: the file), "message"}].
+#                                                     Mako has checked the sha, the reviewer, the score and
+#                                                     every path and line before calling it.
 #   finish(ctx, issue, event, outcome, note) -> dict  after close/release/discard (event) of an issue with
 #                                                     a ref; on close, {"transcript": markdown} is kept
 #                                                     as <review_transcripts_to>/review_<ID>.md if that
@@ -598,6 +608,11 @@ class Mako:
     def review_has_status(self) -> bool:
         """Can the backend report on a review (review_status)?"""
         return self.backend_hook("status") is not None
+
+    @property
+    def review_has_comment(self) -> bool:
+        """Can other slots post reviews to the backend (post_review)?"""
+        return self.backend_hook("comment") is not None
 
     # ids & paths
 
@@ -1371,6 +1386,7 @@ class Mako:
                 raise MakoError(f"{e}. No review was recorded; call request_review again once that is fixed") from None
             if sent.get("ref") is not None:
                 lock["review_ref"] = sent["ref"]
+            lock["review_revision"] = sent.get("revision")
             info = {"text": str(sent.get("text") or f"Sent {cid} for review.")}
             self.run_hook("review", card, lock, {"sha": head, "review_ref": sent.get("ref"),
                                                  "review_url": sent.get("url")})
@@ -1570,7 +1586,113 @@ class Mako:
                             '("review" in .mako/config.json)')
         card = self.get(cid)
         with self.backend_errors() as hooks:
-            return hooks.status(self.review_context(), card.id)
+            report = hooks.status(self.review_context(), card.id)
+        # Mako's own fields, so a reviewing slot can read the uploaded change from its worktree.
+        lock = self.read_lock(card.id)
+        if isinstance(report, dict) and lock and lock.get("reviewed"):
+            sha = lock["reviewed"]
+            report.update(sha=sha, parent=self._merge_base(sha), author=lock.get("agent"))
+        return report
+
+    def waiting_for_review(self, card: Card) -> bool:
+        """Claimed, sent for review, and no commits since: what a reviewer would look at."""
+        lock = self.read_lock(card.id)
+        branch = card.meta.get("branch", "")
+        if not lock or not lock.get("reviewed") or not branch:
+            return False
+        head = _git(self.project, "rev-parse", "--verify", "--quiet", branch)
+        return head.returncode == 0 and head.stdout.strip() == lock["reviewed"]
+
+    def _merge_base(self, sha: str) -> str:
+        return git(self.project, "merge-base", self.base, sha)
+
+    def _post_review(self, cid: str, reviewer: str | None, sha: str | None, message: str, score: int,
+                     comments: list | None, files: list | None) -> dict:
+        """Post a review of another slot's uploaded change to the backend's comment hook, as
+        reviewer: a worker slot, or `human` (the CLI without MAKO_AGENT). Refused unless it is of
+        the revision the last request_review uploaded (sha), and every comment is on a file the
+        change modifies, at a line that exists at sha. Advisory: the close gate never reads it."""
+        if not self.review_has_comment:
+            raise MakoError("posting reviews needs a review backend that takes comments "
+                            '("review" in .mako/config.json)')
+        if reviewer != "human" and reviewer not in self.agents:
+            raise MakoError(f"only worker slots ({', '.join(self.agents)}) can post reviews; "
+                            f"{reviewer or 'the orchestrator'} is not one")
+        card = self.get(cid)
+        cid = card.id
+        lock = self.read_lock(cid)
+        if card.status != "in-progress" or not lock:
+            raise MakoError(f"{cid} is not in progress; only a claimed issue in review can be reviewed")
+        if not lock.get("reviewed") or lock.get("review_ref") is None:
+            raise MakoError(f"{cid} has no review to post to: {lock.get('agent')} hasn't called request_review")
+        author = lock.get("agent")
+        if reviewer == author:
+            raise MakoError(f"{cid} is your own claim; you can't review it. Another slot or the user reviews it")
+        current = lock["reviewed"]
+        if sha is not None:
+            given = str(sha).strip()
+            resolved = _git(self.project, "rev-parse", "--verify", "--quiet", f"{given}^{{commit}}") if given else None
+            if not resolved or resolved.returncode or resolved.stdout.strip() != current:
+                raise MakoError(f"{cid} has a newer upload ({current[:7]}) than {given[:7] or 'the sha you gave'}; "
+                                "call review_status again and review that")
+        limit = 2 if reviewer == "human" else 1
+        try:
+            score = int(score)
+        except (TypeError, ValueError):
+            raise MakoError(f"score must be a whole number from -{limit} to {limit}") from None
+        if not -limit <= score <= limit:
+            who = "the user" if reviewer == "human" else "agents"
+            raise MakoError(f"score {score} is out of range: {who} score -{limit} to {limit}"
+                            + ("" if reviewer == "human" else " (only the user approves)"))
+        parent = self._merge_base(current)
+        changed = git(self.project, "-c", "core.quotePath=false", "diff", "--name-only", parent, current).splitlines()
+        scope = [self._review_path(p) for p in files or []]
+        for path in scope:
+            if path not in changed:
+                raise MakoError(f"{path} is not changed by {cid}; it changes: {', '.join(changed)}")
+        if scope and score > 0:
+            raise MakoError(f"a review of only some files can't score +{score}: they can't vouch for the "
+                            "whole change. Score 0 or -1, or review all of it")
+        found = []
+        for raw in comments or []:
+            if not isinstance(raw, dict) or not str(raw.get("message") or "").strip() or not raw.get("path"):
+                raise MakoError(f"each comment needs a path and a message: {raw!r}")
+            path, line = self._review_path(raw["path"]), raw.get("line")
+            if path not in changed:
+                raise MakoError(f"{path} is not changed by {cid}, so it can't take a comment; "
+                                f"it changes: {', '.join(changed)}")
+            if scope and path not in scope:
+                raise MakoError(f"{path} is outside the files you reviewed ({', '.join(scope)})")
+            if line is not None:
+                data = git_file(self.project, current, path)
+                lines = 0 if data is None else data.count(b"\n") + (not data.endswith(b"\n") and bool(data))
+                if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+                    raise MakoError(f"bad line {line!r} for {path}: a line number from 1, or none for the file")
+                if line > lines:
+                    raise MakoError(f"{path} has {lines} line{'s' * (lines != 1)} at {current[:7]}, "
+                                    f"so there is no line {line}"
+                                    + (" (it is deleted there: comment on the file)" if data is None else ""))
+            found.append({"path": path, "line": line, "message": str(raw["message"]).strip()})
+        message = str(message or "").strip()
+        if scope:
+            message = f"Reviewed only: {', '.join(scope)}" + (f"\n\n{message}" if message else "")
+        if not message and not found and not score:
+            raise MakoError("nothing to post: give a message, comments or a score")
+        issue = {"id": cid, "title": card.title, "branch": card.meta.get("branch", ""), "agent": author,
+                 "sha": current, "ref": lock["review_ref"], "revision": lock.get("review_revision")}
+        review = {"reviewer": reviewer, "message": message, "score": score, "comments": found}
+        with self.backend_errors() as hooks:
+            posted = hooks.comment(self.review_context(), issue, review) or {}
+        return {"id": cid, "author": author, "sha": current, "url": posted.get("url"),
+                "text": str(posted.get("text") or f"Posted your review of {cid}.")}
+
+    @staticmethod
+    def _review_path(path) -> str:
+        """A repo path as git prints it: forward slashes, no leading ./"""
+        text = str(path).strip().replace("\\", "/")
+        while text.startswith("./"):
+            text = text[2:]
+        return text
 
     def _discard(self, cid: str, agent: str | None, note: str, force: bool) -> Card:
         """Drop an issue without merging: the card moves to kanban/discarded/ and
@@ -1820,6 +1942,10 @@ class Mako:
     def review(self, cid, agent=None):
         return self.transact(lambda: self._review(cid, agent))
 
+    def post_review(self, cid, reviewer, sha, message, score=0, comments=None, files=None):
+        # Under the board lock, like request_review, so an upload can't land between the checks and the post.
+        return self.transact(lambda: self._post_review(cid, reviewer, sha, message, score, comments, files))
+
     def release(self, cid, agent=None, note="", force=False):
         return self.transact(lambda: self._release(cid, agent, note, force))
 
@@ -1877,6 +2003,8 @@ def fmt_issue_list(m: Mako, status: str | None = None, include_done: bool = Fals
                 extra += "  [unapproved]"
             if st == "in-progress" and not c.human:
                 extra += f"  [{c.meta.get('claimed_by')}] {c.meta.get('branch')}"
+                if m.waiting_for_review(c):
+                    extra += "  [in review]"
             elif st == "done" and c.meta.get("merged"):
                 extra += "  [merged]"
             elif st == "done" and c.meta.get("type") == "spike" and not c.human:
@@ -1906,6 +2034,31 @@ def cli_criteria(a) -> list[str] | None:
             found += Path(a.criteria_file).read_text(encoding="utf-8").splitlines()
         except OSError as e:
             raise MakoError(f"can't read {a.criteria_file}: {e.strerror}") from None
+    return found
+
+
+def cli_comments(a) -> list[dict]:
+    """The --inline comments (PATH:LINE=TEXT, or PATH=TEXT for the file) plus --comments-file's."""
+    found = []
+    for raw in a.inline or []:
+        where, sep, text = raw.partition("=")
+        path, colon, line = where.rpartition(":")
+        if not sep or not where.strip():
+            raise MakoError(f"bad --inline '{raw}': use PATH:LINE=TEXT, or PATH=TEXT for the whole file")
+        if colon and line.strip().isdigit():
+            found.append({"path": path, "line": int(line), "message": text})
+        else:
+            found.append({"path": where, "line": None, "message": text})
+    if a.comments_file:
+        try:
+            loaded = json.loads(Path(a.comments_file).read_text(encoding="utf-8"))
+        except OSError as e:
+            raise MakoError(f"can't read {a.comments_file}: {e.strerror}") from None
+        except ValueError as e:
+            raise MakoError(f"{a.comments_file} is not JSON: {e}") from None
+        if not isinstance(loaded, list):
+            raise MakoError(f'{a.comments_file} must hold a list: [{{"path": .., "line": .., "message": ..}}]')
+        found += loaded
     return found
 
 
@@ -1983,6 +2136,10 @@ def review_cli(m: Mako) -> str:
     found = ["`mako review <ID>` (send it for review again)"]
     if m.review_has_status:
         found.append("`mako review <ID> --status`")
+    if m.review_has_comment:
+        found.append('`mako review <ID> --comment ".." [--score N] [--inline path:line=text].. '
+                     "[--comments-file f.json] [--files a,b] [--sha S]` (post a review of another slot's "
+                     "issue, as you, or as `human` outside an agent pane)")
     if m.backend_hook("setup") is not None:
         found.append("`mako review setup` (set the review backend up)")
     return ", ".join(found) + ",\n"
@@ -2003,6 +2160,7 @@ def guide(m: Mako, agent: str | None) -> str:
         names = ["common", "worker", *(["pre-close"] if m.hooks["pre_close"] else []),
                  *(["review"] if m.reviewing else []),
                  *([backend] if m.review_backend and (m.dir / "prompts" / f"{backend}.txt").is_file() else []),
+                 *(["review-agents"] if m.review_has_comment else []),
                  "cli"]
     return "\n\n".join(prompt(m, n, values) for n in names) + "\n"
 
@@ -2039,9 +2197,10 @@ def approval_note(card: Card) -> str:
     return " (not approved yet: the user must set `approved: true` on the card before anyone can claim it)"
 
 
-def mcp_tools(review: bool, worker: bool, status: bool = False) -> list[dict]:
+def mcp_tools(review: bool, worker: bool, status: bool = False, comment: bool = False) -> list[dict]:
     tools = [t for t in MCP_TOOLS if (review or t["name"] != "request_review")
-             and (status or t["name"] != "review_status")]
+             and (status or t["name"] != "review_status")
+             and ((comment and worker) or t["name"] != "post_review")]
     role = "worker" if worker else "orchestrator"
     return [{**t, "description": CREATE_ISSUE_HELP[role]} if t["name"] == "create_issue" else t
             for t in tools]
@@ -2135,8 +2294,33 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     {"name": "review_status",
      "description": "The issue's review from the review backend, as JSON (e.g. state, votes, messages and "
-                    "inline comments). Call it after the user says they have reviewed.",
+                    "inline comments). Call it after the user says they have reviewed. Mako adds `sha` "
+                    "(the uploaded commit), `parent` (its merge base with the base branch) and `author`.",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "post_review",
+     "description": "Review another slot's issue when the user asks you to: post a message, a score and "
+                    "inline comments to its review, as your slot. First call review_status and read the "
+                    "change with `git diff <parent> <sha>` and `git show <sha>:<path>`; pass that sha. "
+                    "Refused for your own claim and for an outdated sha. Your review is advisory: only "
+                    "the user approves.",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string"},
+         "sha": {"type": "string", "description": "The `sha` from review_status: the upload you reviewed."},
+         "message": {"type": "string", "description": "Your overall review."},
+         "score": {"type": "integer", "enum": [-1, 0, 1],
+                   "description": "-1 = must change, 0 = comments only, +1 = looks good to me."},
+         "comments": {"type": "array",
+                      "description": "Inline comments on the new version of files the change modifies.",
+                      "items": {"type": "object", "properties": {
+                          "path": {"type": "string"},
+                          "line": {"type": "integer",
+                                   "description": "Line in the file at sha; omit for the whole file."},
+                          "message": {"type": "string"}},
+                          "required": ["path", "message"]}},
+         "files": {"type": "array", "items": {"type": "string"},
+                   "description": "Only if you reviewed just these files: the message says so, comments must "
+                                  "be on them, and the score can't be +1."}},
+         "required": ["id", "sha", "message"]}},
     {"name": "discard_issue",
      "description": "Drop an issue that won't be done: moves the card to kanban/discarded and off the board "
                     "without merging. A claim is freed but its branch is kept. Workers may discard only "
@@ -2207,6 +2391,12 @@ def mcp_call(name: str, args: dict, agent: str | None) -> str:
                       f"tests, commit and call request_review again. Log: {info['log']}")
     elif name == "review_status":
         result = json.dumps(m.review_status(args["id"]), indent=2)
+    elif name == "post_review":
+        # The reviewer is this server's slot, never an argument: no posting as another slot or the user.
+        info = m.post_review(args["id"], agent if agent in m.agents else None, args["sha"], args.get("message", ""),
+                             args.get("score", 0), args.get("comments"), args.get("files"))
+        result = (f"{info['text']}\nTell the user your review of {info['id']} is posted; its author "
+                  f"({info['author']}) reads it with review_status.")
     elif name == "release_issue":
         card = m.release(args["id"], agent, args.get("note", ""))
         result = f"Released {card.id} back to the Backlog."
@@ -2250,7 +2440,7 @@ def serve_mcp() -> None:
         elif method == "tools/list":
             m = Mako(root)
             # Read per call: config.json may change.
-            result = {"tools": mcp_tools(m.reviewing, agent in m.agents, m.review_has_status)}
+            result = {"tools": mcp_tools(m.reviewing, agent in m.agents, m.review_has_status, m.review_has_comment)}
         elif method == "tools/call":
             try:
                 text, is_error = mcp_call(params.get("name"), params.get("arguments") or {}, agent), False
@@ -2815,6 +3005,15 @@ def main(argv: list[str] | None = None) -> int:
                        "backend); `mako review setup` sets the backend up")
     s.add_argument("id", help="the issue, or `setup` to set the review backend up")
     s.add_argument("--status", action="store_true", help="print the backend's report on the review as JSON")
+    s.add_argument("--comment", metavar="TEXT", help="post a review of another slot's issue with this message, "
+                   "as MAKO_AGENT, or as `human` when it isn't set")
+    s.add_argument("--score", type=int, default=0, help="with --comment: -1..1 (as `human`: -2..2)")
+    s.add_argument("--inline", action="append", metavar="PATH:LINE=TEXT",
+                   help="with --comment: an inline comment (repeatable; PATH=TEXT for the whole file)")
+    s.add_argument("--comments-file", metavar="FILE",
+                   help='with --comment: inline comments as JSON, [{"path": .., "line": .., "message": ..}]')
+    s.add_argument("--files", help="with --comment: you reviewed only these files (comma-separated)")
+    s.add_argument("--sha", help="with --comment: the upload you reviewed (default: the latest)")
     s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
     s = sub.add_parser("discard", help="drop an issue without merging (kanban/discarded, branch kept)")
@@ -2909,6 +3108,10 @@ def main(argv: list[str] | None = None) -> int:
             out = m.review_setup()
         elif a.cmd == "review" and a.status:
             out = json.dumps(m.review_status(a.id), indent=2)
+        elif a.cmd == "review" and a.comment is not None:
+            files = [f.strip() for f in (a.files or "").split(",") if f.strip()]
+            info = m.post_review(a.id, a.agent or "human", a.sha, a.comment, a.score, cli_comments(a), files)
+            out = info["text"]
         elif a.cmd == "review":
             info = m.review(a.id, a.agent)
             out = (f"Recorded the review of {info['id']} ({info['sha'][:7]}) on {info['branch']}:\n{info['stat']}"
