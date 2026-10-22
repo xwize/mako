@@ -265,6 +265,7 @@ it reads it with `review_status` like yours.
   exist. A review of some files only (`files`) says so and can't score +1.
 - Reviewing takes no claim: a slot can review while it holds its own issue.
 - An agent's -1 is dropped by Gerrit on the next patch set, so it doesn't linger after a fix.
+  A score of 0 is comments only and leaves the reviewer's earlier vote on that patch set as it is.
 - `list_issues` (and `mako list`) marks an issue `[in review]` while its latest upload is waiting.
 - From a terminal: `mako review <ID> --comment "msg" [--score N] [--inline path:line=text]..
   [--comments-file f.json] [--files a,b] [--sha S]`. It posts as `MAKO_AGENT` in an agent pane,
