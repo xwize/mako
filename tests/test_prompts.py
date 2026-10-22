@@ -29,7 +29,7 @@ GUIDE_PARTS = {  # which prompt files each agent is shown, in order
 @pytest.mark.parametrize("review", [False, True], ids=["no-review", "review"])
 def test_each_agent_is_shown_its_prompt_files(ws, agent, review):
     if review:
-        set_config(ws, review_command="difit {base}")
+        set_config(ws, review_hook="difit {base}")
     default = mcp_instructions(ws, agent)
     assert not re.search(r"\{(root|project|base|prefix|agent|agents|worktree|review_cli)\}", default)
     assert ("`mako review <ID>`" in default) == review

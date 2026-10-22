@@ -49,7 +49,7 @@ def test_exactly_the_limit_is_quick(ws):
 
 
 def test_review_heavy_close_refuses_next_claim(ws, tmp_path):
-    set_config(ws, review_command=flag_command(tmp_path / "review.flag"))
+    set_config(ws, review_hook=flag_command(tmp_path / "review.flag"))
     ok(ws, "new", "feature", "One")
     ok(ws, "new", "feature", "Two")
     mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0001")
@@ -62,7 +62,7 @@ def test_review_heavy_close_refuses_next_claim(ws, tmp_path):
 
 
 def test_two_reviews_and_a_quick_close_leave_the_flag_unset(ws, tmp_path):
-    set_config(ws, review_command=flag_command(tmp_path / "review.flag"))
+    set_config(ws, review_hook=flag_command(tmp_path / "review.flag"))
     ok(ws, "new", "feature", "One")
     ok(ws, "new", "feature", "Two")
     mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0001")
@@ -74,7 +74,7 @@ def test_two_reviews_and_a_quick_close_leave_the_flag_unset(ws, tmp_path):
 
 
 def test_zero_disables_each_test(ws, tmp_path):
-    set_config(ws, review_command=flag_command(tmp_path / "review.flag"),
+    set_config(ws, review_hook=flag_command(tmp_path / "review.flag"),
                warn_after_minutes=0, warn_after_reviews=0)
     ws.env["MAKO_NOW"] = "2026-01-05 09:00"
     ok(ws, "new", "feature", "One")
