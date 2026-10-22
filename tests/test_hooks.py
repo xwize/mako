@@ -106,17 +106,15 @@ def test_hook_params(ws, tmp_path):
     assert "MAKO_PARAM_ID" not in seen["env"]
 
 
-def test_review_hook_is_the_review_step_and_wins_over_review_command(ws, tmp_path):
+def test_review_hook_is_the_review_step(ws, tmp_path):
     cmd, out = recorder(tmp_path, "review", "{id} {sha}")
-    set_config(ws, review_hook=cmd, review_command="never-run")
+    set_config(ws, review_hook=cmd)
     ok(ws, "new", "feature", "One")
     mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0001")
     sha = commit(ws, "agent-a", "a.txt", "a\n")
     assert "call `request_review` first" in mcp_err(ws, "agent-a", "close_issue", id="DEMO-0001", note="x")
-    text = mcp_ok(ws, "agent-a", "request_review", id="DEMO-0001")
-    assert "review_hook is used" in text
+    mcp_ok(ws, "agent-a", "request_review", id="DEMO-0001")
     assert recorded(out)["argv"] == ["DEMO-0001", sha]
-    assert "never-run" not in log(ws, "DEMO-0001", "review").read_text(encoding="utf-8")
     mcp_ok(ws, "agent-a", "close_issue", id="DEMO-0001", note="x")
 
 

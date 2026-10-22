@@ -200,9 +200,6 @@ Spikes are never reviewed (they don't merge), and your own `mako close` isn't he
 output goes to `.mako/logs/<ID>.review.log`, and `mako review <ID>` reopens it. If it can't be
 launched, the review request fails and no review is recorded.
 
-`review_command` is the old name of `review_hook` and still works. If both are set,
-`review_hook` is used and the review request says so.
-
 ### Reviewing in Gerrit (optional)
 
 Instead of a review command, Mako can send each issue to a [Gerrit](https://www.gerritcodereview.com/)

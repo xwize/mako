@@ -26,7 +26,7 @@ def test_spike_closes_without_merging_even_when_behind(ws):
 
 
 def test_spike_is_not_review_gated(ws):
-    set_config(ws, review_command="python -c pass")
+    set_config(ws, review_hook="python -c pass")
     ok(ws, "new", "spike", "Try it")
     mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0001")
     commit(ws, "agent-a", "spike.txt", "findings\n")

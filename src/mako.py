@@ -529,11 +529,8 @@ class Mako:
         self.prefix = self.config["prefix"].upper()
         self.base = self.config.get("base_branch", "main")
         self.agents = list(self.config.get("agents", []))
-        # Hooks: <event>_hook -> its commands. review_command is the legacy name of review_hook.
+        # Hooks: <event>_hook -> its commands.
         self.hooks = {event: hook_commands(self.config.get(f"{event}_hook")) for event in HOOK_EVENTS}
-        self.legacy_review = hook_commands(self.config.get("review_command"))
-        self.review_hook_wins = bool(self.hooks["review"] and self.legacy_review)
-        self.hooks["review"] = self.hooks["review"] or self.legacy_review
         params = self.config.get("hook_params")
         self.hook_params = params if isinstance(params, dict) else {}
         # Seconds a pre_close_hook command may run before it is killed and the close refused. 0: no limit.
@@ -1351,8 +1348,6 @@ class Mako:
                             '"review_hook" nor "review" is set')
         if self.auto_approve:
             self.note("note: auto_approve is ignored while a review step is set (review_hook or review)")
-        if self.review_hook_wins:
-            self.note("note: review_hook and the legacy review_command are both set; review_hook is used")
         card = self.get(cid)
         cid = card.id
         lock = self.read_lock(cid)
