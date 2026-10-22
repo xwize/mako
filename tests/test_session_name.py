@@ -11,7 +11,8 @@ import pytest
 from helpers import fails, mako, ok, run
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-import mako as mako_mod  # noqa: E402
+import mako_core  # noqa: E402
+import mako_init  # noqa: E402
 
 
 def read_config(ws) -> dict:
@@ -63,13 +64,13 @@ def test_unknown_slot_is_refused(ws):
 
 def test_project_is_lowercased_and_sanitised():
     config = {"project": "My Proj.v2 [x]", "session_tag": "3f9c"}
-    assert mako_mod.render_session_name(config, "agent-a") == "my-proj-v2--x--agent-a-3f9c"
+    assert mako_core.render_session_name(config, "agent-a") == "my-proj-v2--x--agent-a-3f9c"
     config = {"project": "Mako_Dev", "session_tag": "3f9c"}
-    assert mako_mod.render_session_name(config, "orchestrator") == "mako_dev-orchestrator-3f9c"
+    assert mako_core.render_session_name(config, "orchestrator") == "mako_dev-orchestrator-3f9c"
 
 
 def test_tags_differ_between_workspaces_and_runs(tmp_path):
-    tags = {mako_mod.new_session_tag(tmp_path) for _ in range(20)}
+    tags = {mako_core.new_session_tag(tmp_path) for _ in range(20)}
     assert len(tags) > 1
     assert all(re.fullmatch(r"[0-9a-f]{4}", t) for t in tags)
 
@@ -142,6 +143,6 @@ class TestAgentCmd:
 
 
 def test_generated_agent_cmd_passes_the_name(ws):
-    agent = mako_mod.AGENT_CMD.format(project="demo", title=mako_mod.safe_title("demo"))
+    agent = mako_init.AGENT_CMD.format(project="demo", title=mako_init.safe_title("demo"))
     assert "session-name %SLOT%" in agent
     assert mako(ws, "session-name", "agent-a").code == 0
