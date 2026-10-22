@@ -63,7 +63,7 @@ pins to one.
 
 ### Prerequisites
 
-- **Python 3.8 or newer** as `python` on PATH. Mako is a single standard-library Python file,
+- **Python 3.8 or newer** as `python` on PATH. Mako is standard-library Python only,
   and everything it generates runs `python`, so `py -3` alone isn't enough. A `python` that opens
   the Microsoft Store is only a stub. Install from [python.org](https://www.python.org/downloads/)
   and tick *Add python.exe to PATH*.
@@ -219,7 +219,7 @@ Mako itself knows nothing about Gerrit. `"backend": "gerrit"` loads
 `.mako/templates/review/gerrit.py`, and Mako calls its hooks: `setup`, `request` (for
 `request_review`), `status` (for `review_status`), `comment` (for `post_review`) and `finish`
 (after close, release or discard).
-The hooks are described at the top of `mako.py`.
+The hooks are described at the top of `mako_review.py`.
 
 **You supply the Gerrit; Mako doesn't start, stop or install anything.** The reference setup is
 trayit, a tray tool that runs the official `gerritcodereview/gerrit` image in Docker under WSL
@@ -401,7 +401,8 @@ worktree.
 
 ## Development
 
-Mako's code is `src/mako.py` (single file, standard library only) and `scripts/upgrade.py`. It
+Mako's code is `src/mako.py`, the entry point, plus the `src/mako_*.py` modules it imports
+(standard library only; the module list is in `mako.py`'s docstring), and `scripts/upgrade.py`. It
 supports Python 3.8 and newer, so don't use newer syntax or library features. The tools below are
 for developing Mako only; it doesn't need them to install or run.
 

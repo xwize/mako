@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-import mako as mako_mod  # noqa: E402
+import mako_init as mako_mod  # noqa: E402
 
 
 def test_init_writes_no_mcp_config_files(ws):

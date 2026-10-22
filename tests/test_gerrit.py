@@ -28,7 +28,8 @@ def test_the_backend_knows_nothing_about_hosting():
 
 
 def test_mako_knows_nothing_about_gerrit():
-    assert "gerrit" not in (SRC / "mako.py").read_text(encoding="utf-8").lower()
+    for path in SRC.glob("mako*.py"):
+        assert "gerrit" not in path.read_text(encoding="utf-8").lower(), path.name
 
 
 def test_change_id_is_stable_per_issue():

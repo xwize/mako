@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-import mako as mako_mod  # noqa: E402
+import mako_init as mako_mod  # noqa: E402
 
 
 # Rendered here, not read from the workspace: init writes the Windows files only on Windows.

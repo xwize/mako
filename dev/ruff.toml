@@ -1,6 +1,6 @@
 # Development only. From the repo root, before committing:
 #   uvx ruff check --config dev/ruff.toml src scripts
-# Mako itself stays single-file and standard-library only; nothing here is needed to run it.
+# Mako itself stays standard-library only; nothing here is needed to run it.
 
 target-version = "py38"    # the minimum Mako supports (the walrus operator needs 3.8)
 line-length = 120          # the code is written to about 110; PEP 8's 79 would rewrap most of the file
