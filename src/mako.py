@@ -100,8 +100,9 @@ def load_review_backend(path: Path):
     return module
 
 
-def _config_int(config: dict, key: str, default: int) -> int:
+def _config_int(config: dict, key: str) -> int:
     """A non-negative integer setting; missing, malformed or negative values fall back to the default."""
+    default = CONFIG_DEFAULTS[key]
     try:
         value = int(config.get(key, default))
     except (TypeError, ValueError):
@@ -164,15 +165,20 @@ def git_file(cwd: Path, rev: str, path: str) -> bytes | None:
     return r.stdout if r.returncode == 0 else None
 
 
+def commit_ident(cwd: Path) -> list[str]:
+    """git options that make Mako the committer when the repo has no user.email of its own."""
+    if _git(cwd, "config", "user.email").stdout.strip():
+        return []
+    return ["-c", "user.name=Mako", "-c", "user.email=mako@localhost"]
+
+
 def commit_file(wt: Path, path: str, data: bytes, message: str) -> None:
     """Write a file in a worktree and commit just that file (Mako's own commits)."""
     target = wt / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
-    ident = [] if _git(wt, "config", "user.email").stdout.strip() else \
-        ["-c", "user.name=Mako", "-c", "user.email=mako@localhost"]
     git(wt, "add", "--", path)
-    git(wt, *ident, "commit", "-q", "-m", message, "--", path)
+    git(wt, *commit_ident(wt), "commit", "-q", "-m", message, "--", path)
 
 
 def is_clean(cwd: Path) -> bool:
@@ -211,33 +217,34 @@ def check_merge_to(cwd: Path, merge_to: str, kind: str | None) -> str:
     return merge_to
 
 
-def spawn_detached(cmd: str, cwd: Path, out, env: dict | None = None) -> None:
-    """Start a shell command and don't wait for it. Through the shell so things
-    like npx (a .cmd on Windows) resolve; stdin is DEVNULL so it can never read
-    the MCP server's stdin, and output goes to `out`. On Windows it gets a
-    hidden console of its own (console children stay hidden too) and its own
-    process group, and leaves the caller's job if allowed, so it outlives the
-    MCP server."""
+def start_shell(cmd: str, cwd: Path, out, env: dict | None, flags: int = 0) -> subprocess.Popen:
+    """Start a shell command in a process group of its own. Through the shell so things like
+    npx (a .cmd on Windows) resolve; stdin is DEVNULL so it can never read the MCP server's
+    stdin, and output goes to `out`. On Windows it gets a hidden console of its own (console
+    children stay hidden too), plus any extra creation flags."""
     kw = dict(cwd=str(cwd), shell=True, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env)
     if os.name != "nt":
-        subprocess.Popen(cmd, start_new_session=True, **kw)
+        return subprocess.Popen(cmd, start_new_session=True, **kw)
+    return subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+                            | flags, **kw)
+
+
+def spawn_detached(cmd: str, cwd: Path, out, env: dict | None = None) -> None:
+    """Start a shell command and don't wait for it. On Windows it leaves the caller's job
+    if allowed, so it outlives the MCP server."""
+    if os.name != "nt":
+        start_shell(cmd, cwd, out, env)
         return
-    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     try:
-        subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
+        start_shell(cmd, cwd, out, env, subprocess.CREATE_BREAKAWAY_FROM_JOB)
     except OSError:  # the job doesn't allow breakaway
-        subprocess.Popen(cmd, creationflags=flags, **kw)
+        start_shell(cmd, cwd, out, env)
 
 
 def run_and_wait(cmd: str, cwd: Path, out, env: dict | None, timeout: float | None) -> int | None:
-    """Run a shell command to the end, output to `out`, stdin DEVNULL. Returns its exit
-    code, or None if it ran past timeout (seconds), when its whole process tree is killed."""
-    kw = dict(cwd=str(cwd), shell=True, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env)
-    if os.name == "nt":
-        proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW
-                                | subprocess.CREATE_NEW_PROCESS_GROUP, **kw)
-    else:
-        proc = subprocess.Popen(cmd, start_new_session=True, **kw)
+    """Run a shell command to the end (see start_shell). Returns its exit code, or None if it
+    ran past timeout (seconds), when its whole process tree is killed."""
+    proc = start_shell(cmd, cwd, out, env)
     try:
         return proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -263,6 +270,13 @@ HOOK_EVENTS = ("new", "claim", "review", "pre_close", "close")
 HOOK_PARAMS = ("id", "title", "type", "base", "branch", "sha", "agent", "root", "repo", "worktree",
                "review_ref", "review_url")
 PLACEHOLDER = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+# The optional config.json settings and their defaults. Init writes them all, and adds any
+# missing to an older config, so they can be found; it never changes a value.
+CONFIG_DEFAULTS = {**{f"{event}_hook": "" for event in HOOK_EVENTS}, "hook_params": {},
+                   "pre_close_timeout": 0, "keep_branches": False, "spike_publish_to": "",
+                   "review_transcripts_to": "", "auto_approve": False,
+                   "warn_after_minutes": 30, "warn_after_reviews": 2}
 
 
 def hook_commands(value) -> list[str]:
@@ -544,7 +558,7 @@ class Mako:
         params = self.config.get("hook_params")
         self.hook_params = params if isinstance(params, dict) else {}
         # Seconds a pre_close_hook command may run before it is killed and the close refused. 0: no limit.
-        self.pre_close_timeout = _config_int(self.config, "pre_close_timeout", 0)
+        self.pre_close_timeout = _config_int(self.config, "pre_close_timeout")
         # "review": {"backend": <name>, ..its options..} picks a review backend. Without one, a
         # review_hook is the review step and no backend code is ever loaded; with one, the
         # backend is the review step and the hook runs as well.
@@ -564,8 +578,8 @@ class Mako:
         self.review_transcripts_to = str(self.config.get("review_transcripts_to") or "").strip()
         # /clear nudge: closing an issue open longer than warn_after_minutes or reviewed more than
         # warn_after_reviews times makes that agent's next claim refuse once. 0 turns a test off.
-        self.warn_after_minutes = _config_int(self.config, "warn_after_minutes", 30)
-        self.warn_after_reviews = _config_int(self.config, "warn_after_reviews", 2)
+        self.warn_after_minutes = _config_int(self.config, "warn_after_minutes")
+        self.warn_after_reviews = _config_int(self.config, "warn_after_reviews")
         self.kanban = root / "kanban"
         self.open_dir = self.kanban / "open"
         self.closed_dir = self.kanban / "closed"
@@ -1814,10 +1828,9 @@ class Mako:
                 card.meta["type"] = kind
                 if kind == "spike":
                     card.meta.setdefault("publish_to", self.spike_publish_to)
+                    card.meta.pop("merge_to", None)
                 else:
                     card.meta.pop("publish_to", None)
-                if kind == "spike":
-                    card.meta.pop("merge_to", None)
             if description is not None:
                 card.body = set_section(card.body, cid, "Description", description.strip() or "_TBD_")
             if lifted is not None:
@@ -1968,19 +1981,6 @@ class Mako:
     def sync(self):
         return self.transact(lambda: None)
 
-    def slots(self) -> list[dict]:
-        out = []
-        for agent in self.agents:
-            wt = self.worktree(agent)
-            info = {"agent": agent, "worktree": str(wt), "exists": wt.is_dir()}
-            if wt.is_dir():
-                info["branch"] = current_branch(wt) or f"(detached at {git(wt, 'rev-parse', '--short', 'HEAD')})"
-                info["clean"] = is_clean(wt)
-            lock = self.lock_of(agent)
-            info["issue"] = lock["id"] if lock else None
-            out.append(info)
-        return out
-
 
 # --- formatting ----------------------------------------------------------------
 
@@ -1988,7 +1988,7 @@ def fmt_issue_list(m: Mako, status: str | None = None, include_done: bool = Fals
     """The board's columns, then (with include_done) Done and the discarded issues."""
     cards = m.cards()
     lines = []
-    for st, name in [*COLUMNS.items(), ("discarded", "Discarded")]:
+    for st, name in STATES.items():
         if status and st != status:
             continue
         if st in ("done", "discarded") and not (include_done or status == st):
@@ -2111,12 +2111,15 @@ def fmt_close(m: Mako, card: Card) -> str:
 
 def fmt_slots(m: Mako) -> str:
     lines = []
-    for s in m.slots():
-        if not s["exists"]:
-            lines.append(f"{s['agent']:<10} MISSING worktree {s['worktree']}")
+    for agent in m.agents:
+        wt = m.worktree(agent)
+        if not wt.is_dir():
+            lines.append(f"{agent:<10} MISSING worktree {wt}")
             continue
-        dirty = "" if s["clean"] else "  (uncommitted changes)"
-        lines.append(f"{s['agent']:<10} {s['issue'] or 'idle':<10} {s['branch']}{dirty}")
+        branch = current_branch(wt) or f"(detached at {git(wt, 'rev-parse', '--short', 'HEAD')})"
+        dirty = "" if is_clean(wt) else "  (uncommitted changes)"
+        lock = m.lock_of(agent)
+        lines.append(f"{agent:<10} {lock['id'] if lock else 'idle':<10} {branch}{dirty}")
     return "\n".join(lines)
 
 
@@ -2149,7 +2152,6 @@ def guide(m: Mako, agent: str | None) -> str:
     values = {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
               "agent": agent, "agents": ", ".join(m.agents),
               "worktree": m.worktree(agent) if agent else "",
-              # Review text appears only with a review step; otherwise the guide is as before.
               "review_cli": review_cli(m),
               "pre_close_commands": "".join(f"    {cmd}\n" for cmd in m.hooks["pre_close"])}
     if agent not in m.agents:
@@ -2197,7 +2199,7 @@ def approval_note(card: Card) -> str:
     return " (not approved yet: the user must set `approved: true` on the card before anyone can claim it)"
 
 
-def mcp_tools(review: bool, worker: bool, status: bool = False, comment: bool = False) -> list[dict]:
+def mcp_tools(review: bool, worker: bool, status: bool, comment: bool) -> list[dict]:
     tools = [t for t in MCP_TOOLS if (review or t["name"] != "request_review")
              and (status or t["name"] != "review_status")
              and ((comment and worker) or t["name"] != "post_review")]
@@ -2213,7 +2215,7 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_issues", "description": "List issues on the kanban board.",
      "inputSchema": {"type": "object", "properties": {
-         "status": {"type": "string", "enum": [*COLUMNS, "discarded"], "description": "Only this column."}}}},
+         "status": {"type": "string", "enum": list(STATES), "description": "Only this column."}}}},
     {"name": "get_issue", "description": "Read an issue card (frontmatter and body).",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
     {"name": "create_issue", "description": CREATE_ISSUE_HELP["orchestrator"],
@@ -2651,11 +2653,6 @@ def render_launch_bat(project: str, agents: list[str]) -> str:
     return LAUNCH_BAT.format(diagram=diagram, panes=panes, commands=" ; ^\n  ".join(cmds))
 
 
-# .mako/prompts/worker.finish.txt as the first version of MAKO-0012 shipped it
-# (CRLF -> LF, outer newlines stripped). worker.txt replaced it; init removes it if unedited.
-LEGACY_WORKER_FINISH_SHA256 = "d0aef799393329d25053f2fd53d7f9f29aefa5ab0541acce7e6960d5104efcbe"
-
-
 def text_sha256(data: bytes) -> str:
     """sha256 of a text file's content, ignoring line endings and outer newlines."""
     text = data.decode("utf-8").replace("\r\n", "\n").strip("\n")
@@ -2711,16 +2708,8 @@ class Init:
                 raise MakoError(f"this workspace's project is '{config['project']}', not '{project}'")
             if any(v is not None for v in (prefix, agents, base)):
                 self.log.append("kept existing .mako/config.json (edit it to change prefix, agents or base)")
-            for event in HOOK_EVENTS:  # listed so they can be found; never changed
-                config.setdefault(f"{event}_hook", "")
-            config.setdefault("hook_params", {})
-            config.setdefault("pre_close_timeout", 0)
-            config.setdefault("keep_branches", False)
-            config.setdefault("spike_publish_to", "")
-            config.setdefault("review_transcripts_to", "")
-            config.setdefault("auto_approve", False)
-            config.setdefault("warn_after_minutes", 30)
-            config.setdefault("warn_after_reviews", 2)
+            for key, value in CONFIG_DEFAULTS.items():
+                config.setdefault(key, value)
             if not config.get("session_tag"):  # backfilled once; an existing tag is never changed
                 config["session_tag"] = new_session_tag(self.root)
             return config
@@ -2738,11 +2727,7 @@ class Init:
         if len(set(agents)) != len(agents):
             raise MakoError("agent slot names must be unique")
         return {"project": project, "prefix": prefix, "base_branch": base or "main", "agents": agents,
-                **{f"{event}_hook": "" for event in HOOK_EVENTS}, "hook_params": {},
-                "pre_close_timeout": 0,
-                "keep_branches": False, "spike_publish_to": "",
-                "review_transcripts_to": "", "auto_approve": False, "warn_after_minutes": 30, "warn_after_reviews": 2,
-                "session_tag": new_session_tag(self.root)}
+                **CONFIG_DEFAULTS, "session_tag": new_session_tag(self.root)}
 
     def write(self, path: Path, data: str | bytes, crlf: bool = False) -> None:
         """Write only if the content changed, and log it."""
@@ -2774,9 +2759,7 @@ class Init:
         if not git_ok(repo, "rev-parse", "--verify", "-q", "HEAD"):
             # Worktrees need a commit. Unborn repo: put HEAD on the base branch first.
             git(repo, "symbolic-ref", "HEAD", f"refs/heads/{base}")
-            ident = [] if _git(repo, "config", "user.email").stdout.strip() else \
-                ["-c", "user.name=Mako", "-c", "user.email=mako@localhost"]
-            git(repo, *ident, "commit", "-q", "--allow-empty", "-m", "Initial commit")
+            git(repo, *commit_ident(repo), "commit", "-q", "--allow-empty", "-m", "Initial commit")
             self.log.append(f"made an initial commit on {base} in {repo.name}/")
         if not branch_exists(repo, base):
             raise MakoError(f"{repo.name}/ has no branch '{base}'; create it or pass --base <branch>")
@@ -2864,7 +2847,6 @@ class Init:
                 rec = {**rec, "default": new}
             record[src.name] = rec
         self.write(record_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
-        self.retire_prompt("worker.finish.txt", LEGACY_WORKER_FINISH_SHA256, "worker.txt")
 
     def claude_md(self, project: str) -> None:
         """A new workspace's CLAUDE.md: the line from .mako/prompts/claude-pointer.txt
@@ -2878,19 +2860,6 @@ class Init:
             self.write(self.root / "CLAUDE.md", f"# {project}\n")
             return
         self.write(self.root / "CLAUDE.md", pointer.replace("{project}", project) + f"\n\n# {project}\n")
-
-    def retire_prompt(self, name: str, default_sha256: str, successor: str) -> None:
-        """A prompt file an older Mako installed: deleted if it is still the shipped
-        default, otherwise kept (it's the user's work) with a note to move it."""
-        path = self.dir / "prompts" / name
-        if not path.is_file():
-            return
-        if text_sha256(path.read_bytes()) == default_sha256:
-            path.unlink()
-            self.log.append(f"removed .mako/prompts/{name} (unchanged default, replaced by {successor})")
-        else:
-            self.log.append(f"note: .mako/prompts/{name} is no longer used and was left as it is; "
-                            f"move your changes into .mako/prompts/{successor}, then delete it")
 
     def obsidian(self, project: str) -> None:
         tpl = Path(__file__).resolve().parent / "templates" / "obsidian"
