@@ -24,7 +24,8 @@ PLACEHOLDER = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # The optional config.json settings and their defaults. Init writes them all, and adds any
 # missing to an older config, so they can be found; it never changes a value.
 CONFIG_DEFAULTS = {**{f"{event}_hook": "" for event in HOOK_EVENTS}, "hook_params": {},
-                   "pre_close_timeout": 0, "keep_branches": False, "spike_publish_to": "",
+                   "pre_close_timeout": 0, "keep_branches": False,
+                   "skip_base_merge_on_close": False, "spike_publish_to": "",
                    "review_transcripts_to": "", "auto_approve": False,
                    "warn_after_minutes": 30, "warn_after_reviews": 2}
 
