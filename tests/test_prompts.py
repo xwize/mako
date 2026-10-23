@@ -7,7 +7,7 @@ import pytest
 from helpers import SRC, mako, mcp_err, mcp_guide, mcp_instructions, ok, set_config, text_sha256_normalized
 
 PROMPTS = ("common", "worker", "orchestrator", "guide_review", "guide_cli", "guide_hooks",
-           "guide_review_agents", "guide_review_gerrit", "guide_review_off", "guide_hooks_off", "claude-pointer")
+           "guide_review_agents", "guide_review_gerrit", "claude-pointer")
 
 
 def prompts(ws):
@@ -20,8 +20,8 @@ def test_init_installs_every_prompt(ws):
 
 
 GUIDE_PARTS = {  # which prompt files each agent is shown, in order
-    ("agent-a", False): ["common", "worker", "guide_review_off", "guide_hooks_off", "guide_cli"],
-    ("agent-a", True): ["common", "worker", "guide_review", "guide_hooks_off", "guide_cli"],
+    ("agent-a", False): ["common", "worker", "guide_review", "guide_hooks", "guide_cli"],
+    ("agent-a", True): ["common", "worker", "guide_review", "guide_hooks", "guide_cli"],
     ("orchestrator", False): ["common", "orchestrator", "guide_cli"],
     ("orchestrator", True): ["common", "orchestrator", "guide_cli"],
 }
@@ -36,7 +36,7 @@ def test_each_agent_is_shown_its_prompt_files(ws, agent, review):
     assert not re.search(r"\{(root|project|base|prefix|agent|agents|worktree|review_cli)\}", default)
     assert ("`mako review <ID>`" in default) == review
 
-    for name in ("common", "worker", "orchestrator", "guide_review", "guide_review_off", "guide_hooks_off", "guide_cli"):
+    for name in ("common", "worker", "orchestrator", "guide_review", "guide_hooks", "guide_cli"):
         with open(prompts(ws) / f"{name}.txt", "a", encoding="utf-8") as f:
             f.write(f"\nMARK-{name} agent={{agent}} base={{base}}\n")
     # The MCP `guide` tool and `mako guide` give the same text.
@@ -52,11 +52,12 @@ def test_each_agent_is_shown_its_prompt_files(ws, agent, review):
     assert ok(ws, "guide", "cli", "--agent", agent).rstrip("\n") == mcp_guide(ws, agent, "cli").rstrip("\n")
 
 
-def test_workers_list_every_topic_and_read_only_those_that_apply(ws):
+def test_workers_list_every_topic_whatever_is_configured(ws):
     text = mcp_instructions(ws, "agent-a")
-    assert "(`review`, `hooks`, `cli`)" in text and "Before closing" not in text
-    assert "no review step" in mcp_guide(ws, "agent-a", "review")
-    assert "no `pre_close_hook`" in mcp_guide(ws, "agent-a", "hooks")
+    assert "(`review`, `hooks`, `cli`)" in text
+    assert "Before closing, read the guide topic `review`" in text and "`hooks` (the checks" in text
+    assert "## Code review" in mcp_guide(ws, "agent-a", "review")
+    assert "## Checks before close" in mcp_guide(ws, "agent-a", "hooks")
     set_config(ws, auto_approve=False, pre_close_hook="true")
     text = mcp_instructions(ws, "agent-a")
     assert "(`review`, `hooks`, `cli`)" in text

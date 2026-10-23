@@ -41,30 +41,24 @@ def review_cli(m: Mako) -> str:
 
 
 def topics(m: Mako, agent: str | None) -> dict[str, list[str]]:
-    """The guide topics this role has, and the prompt files of each. A worker always has
-    every topic; one whose feature is off here says so (guide_<topic>_off.txt)."""
+    """The guide topics this role has, and the prompt files of each. A worker has every topic."""
     found = {}
     if agent in m.agents:
-        if m.reviewing:
-            # A backend can bring its own section: .mako/prompts/guide_review_<backend>.txt.
-            backend = f"guide_review_{m.review_backend}"
-            found["review"] = ["guide_review",
-                               *([backend] if m.review_backend and (m.dir / "prompts" / f"{backend}.txt").is_file() else []),
-                               *(["guide_review_agents"] if m.review_has_comment else [])]
-        else:
-            found["review"] = ["guide_review_off"]
-        found["hooks"] = ["guide_hooks"] if m.hooks["pre_close"] else ["guide_hooks_off"]
+        # A backend can bring its own section: .mako/prompts/guide_review_<backend>.txt.
+        backend = f"guide_review_{m.review_backend}"
+        found["review"] = ["guide_review",
+                           *([backend] if m.review_backend and (m.dir / "prompts" / f"{backend}.txt").is_file() else []),
+                           *(["guide_review_agents"] if m.review_has_comment else [])]
+        found["hooks"] = ["guide_hooks"]
     found["cli"] = ["guide_cli"]
     return found
 
 
-def finish_topics(m: Mako, agent: str | None) -> str:
-    """worker.txt's line on which topics to read before closing: only those that apply here."""
-    if agent not in m.agents:
-        return ""
+def finish_topics(found: dict) -> str:
+    """worker.txt's line on which topics to read before closing."""
     why = {"review": "`review` (the user must approve before you close)",
            "hooks": "`hooks` (the checks `close_issue` runs)"}
-    wanted = [why["review"]] * m.reviewing + [why["hooks"]] * bool(m.hooks["pre_close"])
+    wanted = [why[t] for t in why if t in found]
     return f"   Before closing, read the guide topic {' and '.join(wanted)}.\n" if wanted else ""
 
 
@@ -74,7 +68,7 @@ def prompt_values(m: Mako, agent: str | None) -> dict:
     return {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
             "agent": agent, "agents": ", ".join(m.agents),
             "worktree": m.worktree(agent) if agent else "",
-            "topics": ", ".join(f"`{t}`" for t in found), "finish_topics": finish_topics(m, agent),
+            "topics": ", ".join(f"`{t}`" for t in found), "finish_topics": finish_topics(found),
             "review_cli": review_cli(m),
             "pre_close_commands": "".join(f"    {cmd}\n" for cmd in m.hooks["pre_close"])}
 

@@ -1,4 +1,0 @@
-## Checks before close
-
-This workspace has no `pre_close_hook`, so `close_issue` runs no checks of its own: run the
-tests yourself before closing. The user sets the checks in .mako/config.json.
