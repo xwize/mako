@@ -22,8 +22,8 @@ def test_init_installs_every_prompt(ws):
 GUIDE_PARTS = {  # which prompt files each agent is shown, in order
     ("agent-a", False): ["common", "worker", "guide_review", "guide_hooks", "guide_cli"],
     ("agent-a", True): ["common", "worker", "guide_review", "guide_hooks", "guide_cli"],
-    ("orchestrator", False): ["common", "orchestrator", "guide_cli"],
-    ("orchestrator", True): ["common", "orchestrator", "guide_cli"],
+    ("orchestrator", False): ["common", "orchestrator", "guide_review", "guide_hooks", "guide_cli"],
+    ("orchestrator", True): ["common", "orchestrator", "guide_review", "guide_hooks", "guide_cli"],
 }
 
 
@@ -52,20 +52,13 @@ def test_each_agent_is_shown_its_prompt_files(ws, agent, review):
     assert ok(ws, "guide", "cli", "--agent", agent).rstrip("\n") == mcp_guide(ws, agent, "cli").rstrip("\n")
 
 
-def test_workers_list_every_topic_whatever_is_configured(ws):
-    text = mcp_instructions(ws, "agent-a")
-    assert "(`review`, `hooks`, `cli`)" in text
-    assert "Before closing, read the guide topic `review`" in text and "`hooks` (the checks" in text
-    assert "## Code review" in mcp_guide(ws, "agent-a", "review")
-    assert "## Checks before close" in mcp_guide(ws, "agent-a", "hooks")
-    set_config(ws, auto_approve=False, pre_close_hook="true")
-    text = mcp_instructions(ws, "agent-a")
-    assert "(`review`, `hooks`, `cli`)" in text
-    assert "Before closing, read the guide topic `review`" in text and "`hooks` (the checks" in text
-    assert "## Code review" in mcp_guide(ws, "agent-a", "review")
-    assert "    true\n" in mcp_guide(ws, "agent-a", "hooks")
-    assert "(`cli`)" in mcp_instructions(ws, "orchestrator")
-    assert "no guide topic 'review' here; topics: cli" in mcp_err(ws, "orchestrator", "guide", topic="review")
+def test_every_topic_is_listed_for_everyone(ws):
+    for agent in ("agent-a", "orchestrator"):
+        assert "(`review`, `hooks`, `cli`)" in mcp_instructions(ws, agent)
+        assert "## Code review" in mcp_guide(ws, agent, "review")
+        assert "## Checks before close" in mcp_guide(ws, agent, "hooks")
+    assert "Before closing, read the guide topics `review` and `hooks`." in mcp_instructions(ws, "agent-a")
+    assert "no guide topic 'x'; topics: review, hooks, cli" in mcp_err(ws, "agent-a", "guide", topic="x")
 
 
 def test_init_renames_old_prompt_files_and_keeps_their_edits(ws):

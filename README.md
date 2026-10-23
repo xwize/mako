@@ -112,13 +112,13 @@ tool's `topic` or `mako guide <topic>`; `mako guide` alone prints the core and e
 
 | File | Part |
 | --- | --- |
-| `common.txt` | core: the workspace and the rules, and the topics there are |
+| `common.txt` | core: the workspace and the rules, and the list of topics |
 | `worker.txt` | core: a worker slot's role and how to finish an issue |
 | `orchestrator.txt` | core: the orchestrator's role |
-| `guide_review.txt` | topic `review`: the code review steps, for workers |
+| `guide_review.txt` | topic `review`: the code review steps |
 | `guide_review_<backend>.txt` | topic `review`: a review backend's own section (`guide_review_gerrit.txt`) |
-| `guide_review_agents.txt` | topic `review`: how workers review each other's issues, when the review backend takes comments (Gerrit does) |
-| `guide_hooks.txt` | topic `hooks`: the checks close runs, for workers (`{pre_close_commands}` lists them) |
+| `guide_review_agents.txt` | topic `review`: how workers review each other's issues, with a review backend that takes comments (Gerrit does) |
+| `guide_hooks.txt` | topic `hooks`: the checks close runs (`{pre_close_commands}` lists them) |
 | `guide_cli.txt` | topic `cli`: the CLI list |
 | `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
 
@@ -369,7 +369,7 @@ output. The output is in `.mako/logs/<ID>.pre_close.log`.
   to the branch while they run makes the close refuse; close again.
 - `mako close --force`, run by you, skips them with a warning. Agents can't: `close_issue` has no
   way to, and `mako close --force` from a worker slot still runs them.
-- Workers' guides get a short section (`.mako/prompts/guide_hooks.txt`, guide topic `hooks`) listing the checks.
+- The guide topic `hooks` (`.mako/prompts/guide_hooks.txt`) lists the checks.
 - Build output in the worktree must be gitignored: checks that leave the worktree unclean refuse
   the close.
 

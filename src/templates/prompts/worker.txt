@@ -10,7 +10,8 @@ another slot's worktree, and never run git commands in {project}/.
 4. To finish: commit everything, run `git merge {base}` in your worktree (resolve conflicts there,
    keeping both sides), run the tests, then call `close_issue` with a note on what changed and how
    you tested it. If it says your branch is behind `{base}`, merge again and retry.
-{finish_topics}   A spike never merges: write your findings in the summary file the claim names,
+   Before closing, read the guide topics `review` and `hooks`.
+   A spike never merges: write your findings in the summary file the claim names,
    commit, and call `close_issue` with a short summary.
 5. If you cannot finish, commit and call `release_issue` with a note; the next claim resumes it.
 6. If the user decides an issue won't be done, call `discard_issue` with a note (your own claim
