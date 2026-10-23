@@ -5,7 +5,7 @@ import re
 import socket
 
 import pytest
-from helpers import SRC, card, commit, git, mcp_err, mcp_instructions, mcp_ok, ok, set_config
+from helpers import SRC, card, commit, git, mcp_err, mcp_guide, mcp_ok, ok, set_config
 
 CLIENT = SRC / "templates" / "review" / "gerrit.py"
 spec = importlib.util.spec_from_file_location("gerrit_backend", CLIENT)
@@ -74,8 +74,8 @@ def test_squash_is_one_commit_and_leaves_the_branch_alone(ws, monkeypatch):
 def test_installed_and_offered_to_workers(ws):
     assert (ws.root / ".mako" / "templates" / "review" / "gerrit.py").is_file()
     set_config(ws, review={"backend": "gerrit", "url": dead_url()})
-    assert "Reviews happen in Gerrit" in mcp_instructions(ws, "agent-a")
-    assert "Reviews happen in Gerrit" not in mcp_instructions(ws, "orchestrator")
+    assert "Reviews happen in Gerrit" in mcp_guide(ws, "agent-a")
+    assert "Reviews happen in Gerrit" not in mcp_guide(ws, "orchestrator")
 
 
 def test_unreachable_gerrit_says_what_to_do(ws):

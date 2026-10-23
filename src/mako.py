@@ -152,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("deps", nargs="+")
 
     s = sub.add_parser("guide", help="print the Mako rules for an agent slot or the orchestrator")
+    s.add_argument("topic", nargs="?", help="just this topic (review, hooks, cli); default: everything")
     s.add_argument("--agent", default=os.environ.get("MAKO_AGENT"))
 
     sub.add_parser("status", help="show agent slots")
@@ -259,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
                               publish_to=a.publish_to, criteria=criteria, merge_to=a.merge_to)
                 out = f"Edited {card.id}: {card.title}"
         elif a.cmd == "guide":
-            out = guide(m, a.agent)
+            out = guide(m, a.agent, a.topic)
         elif a.cmd == "status":
             m.sync()
             out = fmt_slots(m)

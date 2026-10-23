@@ -57,6 +57,18 @@ def launch(m: Mako, who: str | None, resume: bool = False) -> str:
 # Claude Code cuts project folder names to this many characters (plus a hash suffix).
 CLAUDE_PROJECT_NAME_MAX = 200
 
+# Prompt files whose name changed (MAKO-0071): old -> new, applied in .mako/prompts/ by init.
+# review-<x>.txt (review-agents and each backend's) became guide_review_<x>.txt.
+PROMPT_RENAMES = {"cli.txt": "guide_cli.txt", "pre-close.txt": "guide_hooks.txt", "review.txt": "guide_review.txt"}
+
+
+def renamed_prompt(name: str) -> str | None:
+    if name in PROMPT_RENAMES:
+        return PROMPT_RENAMES[name]
+    if (m := re.fullmatch(r"review-(.+\.txt)", name)):
+        return f"guide_review_{m.group(1)}"
+    return None
+
 
 def has_session(cwd: Path) -> bool:
     """Whether Claude Code has a conversation that `claude -c` would continue in
@@ -392,6 +404,15 @@ class Init:
             record = json.loads(record_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             record = {}
+        # Renamed defaults: move the file and its record, so edits are still kept.
+        for old in sorted({p.name for p in folder.glob("*.txt")} | set(record)):
+            if not (new_name := renamed_prompt(old)):
+                continue
+            if (folder / old).is_file() and not (folder / new_name).exists():
+                (folder / old).rename(folder / new_name)
+                self.log.append(f"renamed .mako/prompts/{old} to {new_name}")
+            if old in record:
+                record.setdefault(new_name, record.pop(old))
         for src in sorted(tpl.glob("*.txt")):
             dst, name = folder / src.name, f".mako/prompts/{src.name}"
             new = text_sha256(src.read_bytes())

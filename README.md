@@ -104,22 +104,27 @@ touches your cards, config or repo history.
 
 ### Editing what agents are told
 
-Each agent's guide (the `mako` MCP server's instructions, also `mako guide`) is built fresh from
-the files in `.mako/prompts/`:
+What each agent is told is built fresh from the files in `.mako/prompts/`. The `mako` MCP server's
+instructions, which every agent gets when it starts, are the core: `common.txt` plus `worker.txt`
+or `orchestrator.txt`. Claude Code cuts those instructions off at 4096 characters, so keep the
+core short; the server warns when it isn't. The rest is in guide topics, read with the `guide`
+tool's `topic` or `mako guide <topic>`; `mako guide` alone prints the core and every topic.
 
 | File | Part |
 | --- | --- |
-| `common.txt` | top of every guide: the workspace and the rules |
-| `worker.txt` | a worker slot's role and how to finish an issue |
-| `orchestrator.txt` | the orchestrator's role |
-| `review.txt` | the code review steps, shown to workers unless `auto_approve` is on with no `review_hook` or `review` set |
-| `review-agents.txt` | how workers review each other's issues, shown when the review backend takes comments (Gerrit does) |
-| `pre-close.txt` | the checks close runs, shown to workers only when `pre_close_hook` is set (`{pre_close_commands}` lists them) |
-| `cli.txt` | the CLI list at the end of every guide |
+| `common.txt` | core: the workspace and the rules, and the topics there are |
+| `worker.txt` | core: a worker slot's role and how to finish an issue |
+| `orchestrator.txt` | core: the orchestrator's role |
+| `guide_review.txt` | topic `review`: the code review steps, for workers unless `auto_approve` is on with no `review_hook` or `review` set |
+| `guide_review_<backend>.txt` | topic `review`: a review backend's own section (`guide_review_gerrit.txt`) |
+| `guide_review_agents.txt` | topic `review`: how workers review each other's issues, when the review backend takes comments (Gerrit does) |
+| `guide_hooks.txt` | topic `hooks`: the checks close runs, for workers when `pre_close_hook` is set (`{pre_close_commands}` lists them) |
+| `guide_cli.txt` | topic `cli`: the CLI list |
 | `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
 
 They can use `{root}`, `{project}`, `{base}`, `{prefix}`, `{agent}`, `{agents}` and `{worktree}`;
-other braces are left as they are. A deleted file shows a "missing" message in its place, and
+other braces are left as they are. Older workspaces' `cli.txt`, `pre-close.txt` and `review*.txt`
+are renamed by `mako init`, edits included. A deleted file shows a "missing" message in its place, and
 `mako init` restores it. On an upgrade, a file you haven't changed follows the new default; one
 you have edited is kept, with a note pointing at the new default in `.mako/templates/prompts/`.
 
@@ -364,7 +369,7 @@ output. The output is in `.mako/logs/<ID>.pre_close.log`.
   to the branch while they run makes the close refuse; close again.
 - `mako close --force`, run by you, skips them with a warning. Agents can't: `close_issue` has no
   way to, and `mako close --force` from a worker slot still runs them.
-- Workers' guides get a short section (`.mako/prompts/pre-close.txt`) listing the checks.
+- Workers' guides get a short section (`.mako/prompts/guide_hooks.txt`, guide topic `hooks`) listing the checks.
 - Build output in the worktree must be gitignored: checks that leave the worktree unclean refuse
   the close.
 
