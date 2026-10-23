@@ -2,7 +2,7 @@
 show the user the change and close_issue is gated on it, unless auto_approve is on."""
 import json
 
-from helpers import card, commit, git, mcp_err, mcp_instructions, mcp_ok, mcp_tools, ok, set_config
+from helpers import card, commit, git, mcp_err, mcp_guide, mcp_ok, mcp_tools, ok, set_config
 from test_review import flag_command
 from test_review_backend import use_stub
 
@@ -50,11 +50,11 @@ def test_default_gates_close_until_request_review_covers_head(ws):
 
 def test_default_guide_describes_the_manual_review(ws):
     manual(ws)
-    worker = mcp_instructions(ws, "agent-a")
+    worker = mcp_guide(ws, "agent-a")
     assert "## Code review" in worker and "tells you what to show them" in worker
     assert "`mako review <ID>` (show the change and record it as reviewed)" in worker
     set_config(ws, auto_approve=True)
-    assert "## Code review" not in mcp_instructions(ws, "agent-a")
+    assert "## Code review" not in mcp_guide(ws, "agent-a")
 
 
 def test_mako_review_records_the_manual_review_for_the_human(ws):

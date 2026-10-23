@@ -104,8 +104,10 @@ touches your cards, config or repo history.
 
 ### Editing what agents are told
 
-Each agent's guide (the `mako` MCP server's instructions, also `mako guide`) is built fresh from
-the files in `.mako/prompts/`:
+Each agent's guide (the `mako` MCP server's `guide` tool, also `mako guide`) is built fresh from
+the files in `.mako/prompts/`. Claude Code cuts an MCP server's instructions off at 4096
+characters, so the instructions an agent gets when it starts are only a short core for its role
+(`brief-*.txt`) that tells it to call `guide` first:
 
 | File | Part |
 | --- | --- |
@@ -116,6 +118,7 @@ the files in `.mako/prompts/`:
 | `review-agents.txt` | how workers review each other's issues, shown when the review backend takes comments (Gerrit does) |
 | `pre-close.txt` | the checks close runs, shown to workers only when `pre_close_hook` is set (`{pre_close_commands}` lists them) |
 | `cli.txt` | the CLI list at the end of every guide |
+| `brief-worker.txt`, `brief-orchestrator.txt` | the MCP server's instructions: the core of each role, pointing at `guide`. Keep them under 4096 characters; the server warns when they aren't |
 | `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
 
 They can use `{root}`, `{project}`, `{base}`, `{prefix}`, `{agent}`, `{agents}` and `{worktree}`;

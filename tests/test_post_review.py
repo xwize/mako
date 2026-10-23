@@ -2,7 +2,7 @@
 hook. A stub backend logs the calls, as in test_review_backend.py."""
 import json
 
-from helpers import commit, fails, git, mcp_err, mcp_instructions, mcp_ok, mcp_tools, ok
+from helpers import commit, fails, git, mcp_err, mcp_guide, mcp_ok, mcp_tools, ok
 from test_review_backend import STUB, calls, use_stub
 
 COMMENTING = STUB.replace("    return {\"text\": f\"stub review of {issue['id']}\", \"ref\": 7}",
@@ -33,13 +33,13 @@ def post_err(ws, slot="agent-b", **args) -> str:
 def test_offered_to_workers_only_when_the_backend_takes_comments(ws):
     use_stub(ws)
     assert "post_review" not in mcp_tools(ws, "agent-b")
-    assert "Reviewing each other's issues" not in mcp_instructions(ws, "agent-b")
+    assert "Reviewing each other's issues" not in mcp_guide(ws, "agent-b")
     use_stub(ws, COMMENTING)
     assert "post_review" in mcp_tools(ws, "agent-b")
     assert "post_review" not in mcp_tools(ws, "orchestrator")
-    guide = mcp_instructions(ws, "agent-b")
+    guide = mcp_guide(ws, "agent-b")
     assert "Reviewing each other's issues" in guide and "`mako review <ID> --comment" in guide
-    assert "Reviewing each other's issues" not in mcp_instructions(ws, "orchestrator")
+    assert "Reviewing each other's issues" not in mcp_guide(ws, "orchestrator")
 
 
 def test_a_slot_posts_to_the_uploaded_revision(ws):

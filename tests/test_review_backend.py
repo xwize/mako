@@ -2,7 +2,7 @@
 its hooks. A stub backend that logs its calls stands in for a real one."""
 import json
 
-from helpers import card, commit, fails, mcp_err, mcp_instructions, mcp_ok, mcp_tools, ok, set_config
+from helpers import card, commit, fails, mcp_err, mcp_guide, mcp_ok, mcp_tools, ok, set_config
 
 STUB = '''
 import json
@@ -135,7 +135,7 @@ def test_status_and_setup(ws):
     use_stub(ws)
     ok(ws, "new", "feature", "Reviewed")
     assert {"request_review", "review_status"} <= set(mcp_tools(ws, "agent-a"))
-    assert "`mako review <ID> --status`" in mcp_instructions(ws, "agent-a")
+    assert "`mako review <ID> --status`" in mcp_guide(ws, "agent-a")
     assert json.loads(mcp_ok(ws, "agent-a", "review_status", id="DEMO-0001")) == \
         {"issue": "DEMO-0001", "state": "pending"}
     assert json.loads(ok(ws, "review", "DEMO-0001", "--status"))["state"] == "pending"

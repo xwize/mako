@@ -12,6 +12,11 @@ from mako_utils import VERSION, MakoError
 
 # Everything agents are told lives in .mako/prompts/*.txt (shipped as templates/prompts/)
 # so users can edit it. The guide is common + worker or orchestrator (+ review) + cli.
+# The MCP initialize instructions are only brief-<role>.txt, which points at the guide.
+
+# Claude Code's observed truncation point for an MCP server's instructions: past it the
+# text is cut off silently, so agents never learn the rest exists.
+MCP_INSTRUCTIONS_LIMIT = 4096
 
 def review_cli(m: Mako) -> str:
     """The guide's CLI line for the review step: only what this workspace has."""
@@ -33,12 +38,17 @@ def review_cli(m: Mako) -> str:
     return ", ".join(found) + ",\n"
 
 
-def guide(m: Mako, agent: str | None) -> str:
-    values = {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
+def prompt_values(m: Mako, agent: str | None) -> dict:
+    """The placeholders every prompt file can use."""
+    return {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
               "agent": agent, "agents": ", ".join(m.agents),
               "worktree": m.worktree(agent) if agent else "",
               "review_cli": review_cli(m),
               "pre_close_commands": "".join(f"    {cmd}\n" for cmd in m.hooks["pre_close"])}
+
+
+def guide(m: Mako, agent: str | None) -> str:
+    values = prompt_values(m, agent)
     if agent not in m.agents:
         names = ["common", "orchestrator", "cli"]
     else:
@@ -50,6 +60,20 @@ def guide(m: Mako, agent: str | None) -> str:
                  *(["review-agents"] if m.review_has_comment else []),
                  "cli"]
     return "\n\n".join(prompt(m, n, values) for n in names) + "\n"
+
+
+def instructions(m: Mako, agent: str | None) -> str:
+    """The MCP initialize instructions: the short core for the role. Over the limit
+    (an edited prompt), it warns on stderr and at the top, where truncation can't reach."""
+    name = "brief-worker" if agent in m.agents else "brief-orchestrator"
+    text = prompt(m, name, prompt_values(m, agent)) + "\n"
+    if len(text) > MCP_INSTRUCTIONS_LIMIT:
+        warning = (f"note: .mako/prompts/{name}.txt gives {len(text)} characters of MCP instructions, over "
+                   f"Claude Code's {MCP_INSTRUCTIONS_LIMIT}, so the end is cut off. Shorten "
+                   f".mako/prompts/{name}.txt.")
+        print(f"mako: {warning}", file=sys.stderr)
+        text = f"**{warning} Call the `guide` tool for the full rules.**\n\n{text}"
+    return text
 
 
 def prompt(m: Mako, name: str, values: dict) -> str:
@@ -321,7 +345,7 @@ def serve_mcp() -> None:
             result = {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
                       "capabilities": {"tools": {}},
                       "serverInfo": {"name": "mako", "version": VERSION},
-                      "instructions": guide(Mako(root), agent)}
+                      "instructions": instructions(Mako(root), agent)}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

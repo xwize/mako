@@ -3,9 +3,10 @@ import re
 import shutil
 
 import pytest
-from helpers import SRC, mako, mcp_instructions, ok, set_config, text_sha256_normalized
+from helpers import SRC, mako, mcp_guide, mcp_instructions, ok, set_config, text_sha256_normalized
 
-PROMPTS = ("common", "worker", "orchestrator", "review", "cli", "claude-pointer")
+PROMPTS = ("common", "worker", "orchestrator", "review", "cli", "claude-pointer",
+           "brief-worker", "brief-orchestrator")
 
 
 def prompts(ws):
@@ -30,19 +31,32 @@ GUIDE_PARTS = {  # which prompt files each agent is shown, in order
 def test_each_agent_is_shown_its_prompt_files(ws, agent, review):
     if review:
         set_config(ws, review_hook="difit {base}")
-    default = mcp_instructions(ws, agent)
+    default = mcp_guide(ws, agent)
     assert not re.search(r"\{(root|project|base|prefix|agent|agents|worktree|review_cli)\}", default)
     assert ("`mako review <ID>`" in default) == review
 
     for name in ("common", "worker", "orchestrator", "review", "cli"):
         with open(prompts(ws) / f"{name}.txt", "a", encoding="utf-8") as f:
             f.write(f"\nMARK-{name} agent={{agent}} base={{base}}\n")
-    # What agents get is the MCP server's instructions; `mako guide` prints the same.
-    guide = mcp_instructions(ws, agent)
+    # The MCP `guide` tool and `mako guide` give the same text.
+    guide = mcp_guide(ws, agent)
     assert ok(ws, "guide", "--agent", agent).rstrip("\n") == guide.rstrip("\n")
 
     shown = re.findall(r"MARK-(\w+) agent=(\S*) base=main", guide)
     assert shown == [(name, agent) for name in GUIDE_PARTS[agent, review]]
+    assert "MARK-" not in mcp_instructions(ws, agent)
+
+
+@pytest.mark.parametrize("agent", ["agent-a", "orchestrator"])
+def test_instructions_are_the_brief_for_the_role(ws, agent):
+    brief = "brief-worker" if agent == "agent-a" else "brief-orchestrator"
+    other = "brief-orchestrator" if agent == "agent-a" else "brief-worker"
+    for name in (brief, other):
+        with open(prompts(ws) / f"{name}.txt", "a", encoding="utf-8") as f:
+            f.write(f"\nMARK-{name} agent={{agent}} base={{base}}\n")
+    text = mcp_instructions(ws, agent)
+    assert re.findall(r"MARK-([\w-]+) agent=(\S*) base=main", text) == [(brief, agent)]
+    assert "MARK-" not in mcp_guide(ws, agent)
 
 
 def test_missing_file_shows_the_message_and_init_restores_it(ws):
