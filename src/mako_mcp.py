@@ -11,12 +11,14 @@ from mako_utils import VERSION, MakoError
 
 
 # Everything agents are told lives in .mako/prompts/*.txt (shipped as templates/prompts/)
-# so users can edit it. The guide is common + worker or orchestrator (+ review) + cli.
-# The MCP initialize instructions are only brief-<role>.txt, which points at the guide.
+# so users can edit it. The MCP initialize instructions are the core: common + worker or
+# orchestrator. The rest is in topics (guide_<topic>.txt), which agents read with the guide
+# tool; the guide with no topic is the core plus every topic.
 
 # Claude Code's observed truncation point for an MCP server's instructions: past it the
 # text is cut off silently, so agents never learn the rest exists.
 MCP_INSTRUCTIONS_LIMIT = 4096
+
 
 def review_cli(m: Mako) -> str:
     """The guide's CLI line for the review step: only what this workspace has."""
@@ -38,41 +40,70 @@ def review_cli(m: Mako) -> str:
     return ", ".join(found) + ",\n"
 
 
+def topics(m: Mako, agent: str | None) -> dict[str, list[str]]:
+    """The guide topics this role has in this workspace, and the prompt files of each."""
+    found = {}
+    if agent in m.agents:
+        if m.reviewing:
+            # A backend can bring its own section: .mako/prompts/guide_review_<backend>.txt.
+            backend = f"guide_review_{m.review_backend}"
+            found["review"] = ["guide_review",
+                               *([backend] if m.review_backend and (m.dir / "prompts" / f"{backend}.txt").is_file() else []),
+                               *(["guide_review_agents"] if m.review_has_comment else [])]
+        if m.hooks["pre_close"]:
+            found["hooks"] = ["guide_hooks"]
+    found["cli"] = ["guide_cli"]
+    return found
+
+
+def finish_topics(found: dict) -> str:
+    """worker.txt's line on which topics to read before closing, if any apply."""
+    why = {"review": "`review` (the user must approve before you close)",
+           "hooks": "`hooks` (the checks `close_issue` runs)"}
+    wanted = [why[t] for t in why if t in found]
+    return f"   Before closing, read the guide topic {' and '.join(wanted)}.\n" if wanted else ""
+
+
 def prompt_values(m: Mako, agent: str | None) -> dict:
     """The placeholders every prompt file can use."""
+    found = topics(m, agent)
     return {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
-              "agent": agent, "agents": ", ".join(m.agents),
-              "worktree": m.worktree(agent) if agent else "",
-              "review_cli": review_cli(m),
-              "pre_close_commands": "".join(f"    {cmd}\n" for cmd in m.hooks["pre_close"])}
+            "agent": agent, "agents": ", ".join(m.agents),
+            "worktree": m.worktree(agent) if agent else "",
+            "topics": ", ".join(f"`{t}`" for t in found), "finish_topics": finish_topics(found),
+            "review_cli": review_cli(m),
+            "pre_close_commands": "".join(f"    {cmd}\n" for cmd in m.hooks["pre_close"])}
 
 
-def guide(m: Mako, agent: str | None) -> str:
-    values = prompt_values(m, agent)
-    if agent not in m.agents:
-        names = ["common", "orchestrator", "cli"]
+def core_names(m: Mako, agent: str | None) -> list[str]:
+    return ["common", "worker" if agent in m.agents else "orchestrator"]
+
+
+def guide(m: Mako, agent: str | None, topic: str | None = None) -> str:
+    """One topic, or with none, the core and every topic."""
+    found = topics(m, agent)
+    if topic:
+        if topic not in found:
+            raise MakoError(f"no guide topic '{topic}' here; topics: {', '.join(found)}")
+        names = found[topic]
     else:
-        # A backend can bring its own section: .mako/prompts/review-<backend>.txt.
-        backend = f"review-{m.review_backend}"
-        names = ["common", "worker", *(["pre-close"] if m.hooks["pre_close"] else []),
-                 *(["review"] if m.reviewing else []),
-                 *([backend] if m.review_backend and (m.dir / "prompts" / f"{backend}.txt").is_file() else []),
-                 *(["review-agents"] if m.review_has_comment else []),
-                 "cli"]
+        names = core_names(m, agent) + [n for parts in found.values() for n in parts]
+    values = prompt_values(m, agent)
     return "\n\n".join(prompt(m, n, values) for n in names) + "\n"
 
 
 def instructions(m: Mako, agent: str | None) -> str:
-    """The MCP initialize instructions: the short core for the role. Over the limit
-    (an edited prompt), it warns on stderr and at the top, where truncation can't reach."""
-    name = "brief-worker" if agent in m.agents else "brief-orchestrator"
-    text = prompt(m, name, prompt_values(m, agent)) + "\n"
+    """The MCP initialize instructions: the core for the role. Over the limit (an edited
+    prompt), it warns on stderr and at the top, where truncation can't reach."""
+    values = prompt_values(m, agent)
+    names = core_names(m, agent)
+    text = "\n\n".join(prompt(m, n, values) for n in names) + "\n"
     if len(text) > MCP_INSTRUCTIONS_LIMIT:
-        warning = (f"note: .mako/prompts/{name}.txt gives {len(text)} characters of MCP instructions, over "
-                   f"Claude Code's {MCP_INSTRUCTIONS_LIMIT}, so the end is cut off. Shorten "
-                   f".mako/prompts/{name}.txt.")
+        files = " and ".join(f".mako/prompts/{n}.txt" for n in names)
+        warning = (f"note: {files} give {len(text)} characters of MCP instructions, over Claude Code's "
+                   f"{MCP_INSTRUCTIONS_LIMIT}, so the end is cut off. Shorten them.")
         print(f"mako: {warning}", file=sys.stderr)
-        text = f"**{warning} Call the `guide` tool for the full rules.**\n\n{text}"
+        text = f"**{warning} The `guide` tool has the full text.**\n\n{text}"
     return text
 
 
@@ -118,8 +149,11 @@ def mcp_tools(review: bool, worker: bool, status: bool, comment: bool) -> list[d
 
 
 MCP_TOOLS = [
-    {"name": "guide", "description": "How Mako works and the rules for your role. Read this first.",
-     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "guide",
+     "description": "How Mako works and the rules for your role: one topic (your instructions list them), "
+                    "or with none, everything.",
+     "inputSchema": {"type": "object", "properties": {
+         "topic": {"type": "string", "description": "e.g. review, hooks, cli. Omit for everything."}}}},
     {"name": "whoami", "description": "Your agent slot, worktree and current claim.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_issues", "description": "List issues on the kanban board.",
@@ -246,7 +280,7 @@ MCP_TOOLS = [
 def mcp_call(name: str, args: dict, agent: str | None) -> str:
     m = Mako(find_root())
     if name == "guide":
-        return guide(m, agent)
+        return guide(m, agent, args.get("topic") or None)
     if name == "whoami":
         if agent in m.agents:
             lock = m.lock_of(agent)

@@ -52,4 +52,4 @@ def test_repair_on_a_healthy_workspace_changes_nothing(ws):
 
 def test_repair_is_in_the_help_and_the_cli_prompt(ws):
     assert "repair" in ok(ws, "--help")
-    assert "mako repair" in (ws.root / ".mako" / "prompts" / "cli.txt").read_text(encoding="utf-8")
+    assert "mako repair" in (ws.root / ".mako" / "prompts" / "guide_cli.txt").read_text(encoding="utf-8")

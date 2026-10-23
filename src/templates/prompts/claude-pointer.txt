@@ -1,1 +1,1 @@
-This workspace uses Mako for issues and multi-agent work; the `mako` MCP server's instructions give the core, and its `guide` tool (call it first) explains your role and the rules.
+This workspace uses Mako for issues and multi-agent work; the `mako` MCP server's instructions explain your role and the rules, and its `guide` tool has more by topic.

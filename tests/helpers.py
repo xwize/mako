@@ -155,9 +155,9 @@ def mcp_instructions(ws: Workspace, agent: str) -> str:
     return mcp_session(ws, agent, [])[0]["result"]["instructions"]
 
 
-def mcp_guide(ws: Workspace, agent: str) -> str:
-    """The full rules for `agent`: the MCP `guide` tool."""
-    return mcp_ok(ws, agent, "guide")
+def mcp_guide(ws: Workspace, agent: str, topic: str | None = None) -> str:
+    """The MCP `guide` tool: one topic, or everything for `agent`."""
+    return mcp_ok(ws, agent, "guide", **({"topic": topic} if topic else {}))
 
 
 def set_config(ws: Workspace, **values) -> None:
