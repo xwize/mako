@@ -26,30 +26,28 @@ def test_off_merges_as_before(ws):
     assert "skip_base_merge_on_close" not in mcp_instructions(ws, "agent-a")
 
 
-def test_on_skips_the_merge_and_keeps_the_branch(ws):
+def test_on_skips_the_merge(ws):
     set_config(ws, skip_base_merge_on_close=True)
     main = git(ws, "rev-parse", "main")
     claim_and_commit(ws)
     out = mcp_ok(ws, "agent-a", "close_issue", id="DEMO-0001", note="done")
-    assert out == f"Closed DEMO-0001 without merging (skip_base_merge_on_close); branch kept: {ONE}."
+    assert out == "Closed DEMO-0001 without merging (skip_base_merge_on_close)."
     assert git(ws, "rev-parse", "main") == main
-    assert branch_exists(ws, ONE)
+    assert not branch_exists(ws, ONE)  # keep_branches is off
     c = card(ws, "DEMO-0001")
     assert c["status"] == "done" and not c["merged"]
     assert "Closed without merging" in c["_body"]
     # The slot is free again and the next issue can be claimed.
     ok(ws, "new", "feature", "Two")
     mcp_ok(ws, "agent-a", "claim_issue", id="DEMO-0002")
-    # Prune leaves the unmerged branch alone.
-    assert "skipped" in ok(ws, "prune", "DEMO-0001")
-    assert branch_exists(ws, ONE)
     assert "skip_base_merge_on_close" in mcp_instructions(ws, "agent-a")
 
 
 def test_on_with_keep_branches_keeps_the_branch(ws):
     set_config(ws, skip_base_merge_on_close=True, keep_branches=True)
     claim_and_commit(ws)
-    mcp_ok(ws, "agent-a", "close_issue", id="DEMO-0001", note="done")
+    out = mcp_ok(ws, "agent-a", "close_issue", id="DEMO-0001", note="done")
+    assert out == f"Closed DEMO-0001 without merging (skip_base_merge_on_close); branch kept: {ONE}."
     assert branch_exists(ws, ONE)
     assert "DEMO-0001" not in git(ws, "log", "--format=%s", "main")
 

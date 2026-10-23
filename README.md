@@ -399,15 +399,15 @@ resumes its old branch; the worker merges the base branch into it before closing
 touches a Backlog or In Progress issue's branch, the base branch or a branch checked out in a
 worktree.
 
-To keep the work on the issue branches only, set `skip_base_merge_on_close`:
+To skip the merge into the base branch on close, set `skip_base_merge_on_close`; with
+`keep_branches` also on, the work stays on the issue branches only:
 
 ```json
 "skip_base_merge_on_close": true
 ```
 
 Closing then does everything as usual (review, `pre_close_hook`, the behind-base check) except the
-merge into the base branch, and the unmerged branch is always kept. A card's `merge_to` still
-merges.
+merge into the base branch. A card's `merge_to` still merges.
 
 - `mako prune --dry-run` lists what would be deleted.
 - `mako prune <ID..>` prunes only those issues.

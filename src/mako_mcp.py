@@ -63,7 +63,7 @@ def prompt_values(m: Mako, agent: str | None) -> dict:
             "review_cli": review_cli(m),
             "pre_close_commands": "".join(f"    {cmd}\n" for cmd in m.hooks["pre_close"]),
             "skip_merge_note": ("\n- Here `skip_base_merge_on_close` is on: closing skips the merge into "
-                                f"`{m.base}` (a `merge_to` still merges) and keeps the issue branch."
+                                f"`{m.base}` (a `merge_to` still merges)."
                                 if m.skip_base_merge else "")}
 
 
