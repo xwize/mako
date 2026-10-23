@@ -112,13 +112,15 @@ tool's `topic` or `mako guide <topic>`; `mako guide` alone prints the core and e
 
 | File | Part |
 | --- | --- |
-| `common.txt` | core: the workspace and the rules, and the topics there are |
+| `common.txt` | core: the workspace and the rules, and the topics (a worker always has `review`, `hooks` and `cli`) |
 | `worker.txt` | core: a worker slot's role and how to finish an issue |
 | `orchestrator.txt` | core: the orchestrator's role |
 | `guide_review.txt` | topic `review`: the code review steps, for workers unless `auto_approve` is on with no `review_hook` or `review` set |
+| `guide_review_off.txt` | topic `review` instead, when there is no review step: there is none, close when ready |
 | `guide_review_<backend>.txt` | topic `review`: a review backend's own section (`guide_review_gerrit.txt`) |
 | `guide_review_agents.txt` | topic `review`: how workers review each other's issues, when the review backend takes comments (Gerrit does) |
 | `guide_hooks.txt` | topic `hooks`: the checks close runs, for workers when `pre_close_hook` is set (`{pre_close_commands}` lists them) |
+| `guide_hooks_off.txt` | topic `hooks` instead, when no `pre_close_hook` is set: run the tests yourself |
 | `guide_cli.txt` | topic `cli`: the CLI list |
 | `claude-pointer.txt` | the line `mako init` puts at the top of a new workspace's `CLAUDE.md` |
 

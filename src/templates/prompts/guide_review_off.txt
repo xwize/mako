@@ -1,0 +1,4 @@
+## Code review
+
+This workspace has no review step (`auto_approve` is on and no review tool is set): when your
+branch is ready (everything committed, `{base}` merged in, tests passing), call `close_issue`.
