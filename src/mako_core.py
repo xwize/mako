@@ -91,6 +91,9 @@ class Mako(BoardMixin, ReviewMixin, HooksMixin, GitMixin):
         self.auto_approve = self.config.get("auto_approve") is True
         # On: close keeps the merged branch and names it in the merge commit. Off: it's deleted.
         self.keep_branches = self.config.get("keep_branches") is True
+        # On: close skips the merge into the base branch, so the work stays on the issue branch
+        # (kept, whatever keep_branches says). A card's merge_to still merges.
+        self.skip_base_merge = self.config.get("skip_base_merge_on_close") is True
         # Pre-fills publish_to on new spikes. Empty: no default.
         self.spike_publish_to = str(self.config.get("spike_publish_to") or "").strip()
         # Folder (relative: from the workspace root) where close keeps a review backend's transcript.
@@ -435,10 +438,13 @@ class Mako(BoardMixin, ReviewMixin, HooksMixin, GitMixin):
         With a pre_close_hook, HEAD must be the commit it passed on (checked),
         unless unchecked (`mako close --force` by a human).
         Spikes never merge: their result is the closing note, and a branch with
-        commits is kept as it is (no review gate, no behind-base check)."""
+        commits is kept as it is (no review gate, no behind-base check).
+        With skip_base_merge_on_close (and no merge_to) everything runs as usual
+        except the merge itself: the branch is kept, unmerged."""
         card, lock, wt = self._close_refusals(cid, agent, force)
         branch = card.meta.get("branch", "")
         spike = card.meta.get("type") == "spike"
+        skip = self.skip_base_merge and not card.meta.get("merge_to")
         published = None
         if spike:
             published = self._finish_summary(card, wt if wt and current_branch(wt) == branch else None, force)
@@ -451,18 +457,22 @@ class Mako(BoardMixin, ReviewMixin, HooksMixin, GitMixin):
                 self.note(f"warning: --force: the pre_close_hook was not run for {card.id}")
             elif head != checked:
                 raise MakoError(f"{branch} changed while the pre_close_hook ran; close {card.id} again")
-        if pending and not spike:
+        if pending and not spike and skip:
+            self._check_behind(card.id, branch)
+        elif pending and not spike:
             self._merge_into_base(card.id, branch, card.meta.get("merge_to") or "")
         if lock:
             self._free_slot(card.id, lock, branch)
         # A branch that never had commits is always deleted: there is nothing to keep.
         # With keep_branches, one that was merged (now or before a reopen) is kept for `mako prune`.
-        keep = pending if spike else self.keep_branches and (pending or card.meta.get("merged"))
+        # An unmerged one (a spike's, or with skip_base_merge_on_close) is always kept.
+        keep = pending if spike or skip else self.keep_branches and (pending or card.meta.get("merged"))
         if branch and branch_exists(self.project, branch) and not keep:
             # Fully merged (or never had commits). -d only knows the base branch, which a
             # merge_to merge didn't touch; _merge_into_base already did the merge.
             git(self.project, "branch", "-D" if card.meta.get("merge_to") and pending else "-d", branch)
-        if pending and not spike:
+        merged = pending and not spike and not skip
+        if merged:
             card.meta["merged"] = now()
         if spike:
             kept = f"; branch kept: {branch}" if pending else ""
@@ -470,10 +480,11 @@ class Mako(BoardMixin, ReviewMixin, HooksMixin, GitMixin):
             if published:
                 self.note(f"published {card.id}'s summary to {published} (not committed)")
             note = f"Spike closed without merging{kept}.{where}\n\n{note.strip()}"
+        elif pending and skip:
+            note = f"Closed without merging (skip_base_merge_on_close); branch kept: {branch}.\n\n{note.strip()}"
         card.meta.update(status="done", closed=now())
         self._append(card, "Closing note", agent, note)
         self.save(card)
-        merged = pending and not spike
         self._review_finish(card, lock, "close", f"merged into {card.meta.get('merge_to') or self.base}"
                             if merged else "closed without merging", note)
         if lock:
@@ -797,6 +808,9 @@ def fmt_close(m: Mako, card: Card) -> str:
         kept = "; branch kept" if branch and branch_exists(m.project, branch) else ""
         into = card.meta.get("merge_to") or "the base branch"
         return f"Merged {branch} into {into} and closed {card.id}{kept}."
+    branch = card.meta.get("branch")
+    if branch and branch_exists(m.project, branch) and unmerged_commits(m.project, branch, m.base):
+        return f"Closed {card.id} without merging (skip_base_merge_on_close); branch kept: {branch}."
     return f"Closed {card.id} (nothing to merge)."
 
 

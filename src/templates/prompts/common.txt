@@ -7,7 +7,7 @@ This workspace uses Mako: a kanban board plus fixed agent slots, each with its o
 - Issues: cards like `{prefix}-0001` in kanban/open and kanban/closed, shown on kanban/board.md (Obsidian).
 - Lifecycle: Backlog -> In Progress (claim) -> Done (close). Closing merges the issue branch into
   `{base}` (or the card's `merge_to` branch), so nothing reaches Done unmerged, except spikes,
-  which never merge (their branch is kept). `discard_issue` drops an issue without merging.
+  which never merge (their branch is kept). `discard_issue` drops an issue without merging.{skip_merge_note}
 - Mako owns kanban/. Never edit or move those files yourself; use the mako tools. `edit_issue`
   changes a card while it is in the Backlog.
 - Cards marked `human: true` are the user's own tasks: agents can't claim, close or release them.
