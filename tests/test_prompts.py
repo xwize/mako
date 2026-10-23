@@ -20,10 +20,10 @@ def test_init_installs_every_prompt(ws):
 
 
 GUIDE_PARTS = {  # which prompt files each agent is shown, in order
-    ("agent-a", False): ["common", "worker", "guide_cli"],
-    ("agent-a", True): ["common", "worker", "guide_review", "guide_cli"],
-    ("orchestrator", False): ["common", "orchestrator", "guide_cli"],
-    ("orchestrator", True): ["common", "orchestrator", "guide_cli"],
+    ("agent-a", False): ["common", "worker", "guide_review", "guide_hooks", "guide_cli"],
+    ("agent-a", True): ["common", "worker", "guide_review", "guide_hooks", "guide_cli"],
+    ("orchestrator", False): ["common", "orchestrator", "guide_review", "guide_hooks", "guide_cli"],
+    ("orchestrator", True): ["common", "orchestrator", "guide_review", "guide_hooks", "guide_cli"],
 }
 
 
@@ -36,7 +36,7 @@ def test_each_agent_is_shown_its_prompt_files(ws, agent, review):
     assert not re.search(r"\{(root|project|base|prefix|agent|agents|worktree|review_cli)\}", default)
     assert ("`mako review <ID>`" in default) == review
 
-    for name in ("common", "worker", "orchestrator", "guide_review", "guide_cli"):
+    for name in ("common", "worker", "orchestrator", "guide_review", "guide_hooks", "guide_cli"):
         with open(prompts(ws) / f"{name}.txt", "a", encoding="utf-8") as f:
             f.write(f"\nMARK-{name} agent={{agent}} base={{base}}\n")
     # The MCP `guide` tool and `mako guide` give the same text.
@@ -52,16 +52,13 @@ def test_each_agent_is_shown_its_prompt_files(ws, agent, review):
     assert ok(ws, "guide", "cli", "--agent", agent).rstrip("\n") == mcp_guide(ws, agent, "cli").rstrip("\n")
 
 
-def test_topics_are_listed_and_only_those_that_apply(ws):
-    text = mcp_instructions(ws, "agent-a")
-    assert "(`cli`)" in text and "Before closing" not in text
-    assert "no guide topic 'review' here; topics: cli" in mcp_err(ws, "agent-a", "guide", topic="review")
-    set_config(ws, auto_approve=False, pre_close_hook="true")
-    text = mcp_instructions(ws, "agent-a")
-    assert "(`review`, `hooks`, `cli`)" in text
-    assert "Before closing, read the guide topic `review`" in text and "`hooks` (the checks" in text
-    assert "## Code review" in mcp_guide(ws, "agent-a", "review")
-    assert "(`cli`)" in mcp_instructions(ws, "orchestrator")
+def test_every_topic_is_listed_for_everyone(ws):
+    for agent in ("agent-a", "orchestrator"):
+        assert "(`review`, `hooks`, `cli`)" in mcp_instructions(ws, agent)
+        assert "## Code review" in mcp_guide(ws, agent, "review")
+        assert "## Checks before close" in mcp_guide(ws, agent, "hooks")
+    assert "Before closing, read the guide topics `review` and `hooks`." in mcp_instructions(ws, "agent-a")
+    assert "no guide topic 'x'; topics: review, hooks, cli" in mcp_err(ws, "agent-a", "guide", topic="x")
 
 
 def test_init_renames_old_prompt_files_and_keeps_their_edits(ws):

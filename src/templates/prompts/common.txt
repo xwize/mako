@@ -13,4 +13,4 @@ This workspace uses Mako: a kanban board plus fixed agent slots, each with its o
 - Cards marked `human: true` are the user's own tasks: agents can't claim, close or release them.
 - Cards a worker slot creates start `approved: false`, and nobody can claim them until the user
   approves them. Cards the orchestrator or the user create are approved from the start.
-- More detail by topic: the `guide` tool with `topic` ({topics}), or `mako guide <topic>`.
+- More detail by topic: the `guide` tool with `topic` (`review`, `hooks`, `cli`), or `mako guide <topic>`.

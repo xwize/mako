@@ -71,11 +71,10 @@ def test_squash_is_one_commit_and_leaves_the_branch_alone(ws, monkeypatch):
         g.squash(ws.repo, "DEMO-0001", "agent-a", branch, "main", "Squashed")
 
 
-def test_installed_and_offered_to_workers(ws):
+def test_installed_and_in_the_review_topic(ws):
     assert (ws.root / ".mako" / "templates" / "review" / "gerrit.py").is_file()
     set_config(ws, review={"backend": "gerrit", "url": dead_url()})
-    assert "Reviews happen in Gerrit" in mcp_guide(ws, "agent-a")
-    assert "Reviews happen in Gerrit" not in mcp_guide(ws, "orchestrator")
+    assert "Reviews happen in Gerrit" in mcp_guide(ws, "agent-a", "review")
 
 
 def test_unreachable_gerrit_says_what_to_do(ws):

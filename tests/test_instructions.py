@@ -29,9 +29,7 @@ def worst(tmp_path, base_env):
 def test_instructions_stay_under_the_limit(worst, agent):
     text = mcp_instructions(worst, agent)
     assert len(text) <= MCP_INSTRUCTIONS_LIMIT - MARGIN, len(text)
-    assert "the `guide` tool with `topic`" in text and "Mako owns kanban/" in text
-    if agent != "orchestrator":
-        assert "(`review`, `hooks`, `cli`)" in text and "Before closing, read the guide topic `review`" in text
+    assert "(`review`, `hooks`, `cli`)" in text and "Mako owns kanban/" in text
 
 
 def test_guide_still_has_every_section(worst):

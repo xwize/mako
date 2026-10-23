@@ -40,37 +40,26 @@ def review_cli(m: Mako) -> str:
     return ", ".join(found) + ",\n"
 
 
-def topics(m: Mako, agent: str | None) -> dict[str, list[str]]:
-    """The guide topics this role has in this workspace, and the prompt files of each."""
-    found = {}
-    if agent in m.agents:
-        if m.reviewing:
-            # A backend can bring its own section: .mako/prompts/guide_review_<backend>.txt.
-            backend = f"guide_review_{m.review_backend}"
-            found["review"] = ["guide_review",
-                               *([backend] if m.review_backend and (m.dir / "prompts" / f"{backend}.txt").is_file() else []),
-                               *(["guide_review_agents"] if m.review_has_comment else [])]
-        if m.hooks["pre_close"]:
-            found["hooks"] = ["guide_hooks"]
-    found["cli"] = ["guide_cli"]
-    return found
+# The guide topics, the same for everyone. A review backend can add its own section to
+# `review`: .mako/prompts/guide_review_<backend>.txt.
+TOPICS = ("review", "hooks", "cli")
 
 
-def finish_topics(found: dict) -> str:
-    """worker.txt's line on which topics to read before closing, if any apply."""
-    why = {"review": "`review` (the user must approve before you close)",
-           "hooks": "`hooks` (the checks `close_issue` runs)"}
-    wanted = [why[t] for t in why if t in found]
-    return f"   Before closing, read the guide topic {' and '.join(wanted)}.\n" if wanted else ""
+def topic_names(m: Mako, topic: str) -> list[str]:
+    """The prompt files of one topic."""
+    if topic != "review":
+        return [f"guide_{topic}"]
+    backend = f"guide_review_{m.review_backend}"
+    return ["guide_review",
+            *([backend] if m.review_backend and (m.dir / "prompts" / f"{backend}.txt").is_file() else []),
+            *(["guide_review_agents"] if m.review_has_comment else [])]
 
 
 def prompt_values(m: Mako, agent: str | None) -> dict:
     """The placeholders every prompt file can use."""
-    found = topics(m, agent)
     return {"root": m.root, "project": m.config["project"], "base": m.base, "prefix": m.prefix,
             "agent": agent, "agents": ", ".join(m.agents),
             "worktree": m.worktree(agent) if agent else "",
-            "topics": ", ".join(f"`{t}`" for t in found), "finish_topics": finish_topics(found),
             "review_cli": review_cli(m),
             "pre_close_commands": "".join(f"    {cmd}\n" for cmd in m.hooks["pre_close"])}
 
@@ -81,13 +70,12 @@ def core_names(m: Mako, agent: str | None) -> list[str]:
 
 def guide(m: Mako, agent: str | None, topic: str | None = None) -> str:
     """One topic, or with none, the core and every topic."""
-    found = topics(m, agent)
     if topic:
-        if topic not in found:
-            raise MakoError(f"no guide topic '{topic}' here; topics: {', '.join(found)}")
-        names = found[topic]
+        if topic not in TOPICS:
+            raise MakoError(f"no guide topic '{topic}'; topics: {', '.join(TOPICS)}")
+        names = topic_names(m, topic)
     else:
-        names = core_names(m, agent) + [n for parts in found.values() for n in parts]
+        names = core_names(m, agent) + [n for t in TOPICS for n in topic_names(m, t)]
     values = prompt_values(m, agent)
     return "\n\n".join(prompt(m, n, values) for n in names) + "\n"
 

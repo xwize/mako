@@ -54,7 +54,7 @@ def test_default_guide_describes_the_manual_review(ws):
     assert "## Code review" in worker and "tells you what to show them" in worker
     assert "`mako review <ID>` (show the change and record it as reviewed)" in worker
     set_config(ws, auto_approve=True)
-    assert "## Code review" not in mcp_guide(ws, "agent-a")
+    assert "`mako review <ID>`" not in mcp_guide(ws, "agent-a")
 
 
 def test_mako_review_records_the_manual_review_for_the_human(ws):
